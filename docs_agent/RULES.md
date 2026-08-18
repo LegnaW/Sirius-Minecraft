@@ -23,7 +23,7 @@
 3. `dev-journey.md` —— 历史决策叙事（为什么走到今天）
 4. `session/` 最近 1-2 篇日志 —— 上轮做了什么、留了什么尾巴
 5. `PROGRESS.md` —— 跨会话状态锚点（做到哪了、接下来干什么）
-6. 与本轮需求相关的规格章节（`sirius-technical.md` 对应 §、`protocol-neko-mapping.md` 等）
+6. 与本轮需求相关的规格章节（`sirius-technical.md` 对应 §、`protocol-neko-mapping.md` 等）；需要设计愿景背景时另读 `../docs_human/sirius-design.md`（纯思路版，人读层）
 
 ## 3. 开工：方案先行，禁止直接写码
 
@@ -76,11 +76,11 @@
 | `dev-journey.md` | agent | 历史决策叙事（为什么） | 重大决策落地时追加 |
 | `PROGRESS.md` | agent | 跨会话状态锚点（做到哪/接下去） | **每轮结束必更** |
 | `session/YYYY-MM-DD.md` | agent | 当轮 plan+spec + 收尾日志 | 每轮一份 |
-| `sirius-design.md` | agent | 设计权威：理念与架构 | 设计变更时 |
 | `sirius-technical.md` | agent | 技术规格权威：接口/数据结构/路线图 | 接口规格变更时（改码前先改这里） |
 | `protocol-neko-mapping.md` | agent | 自研协议 ↔ NEKO 帧映射 | 协议帧变更时 |
 | `reports/<里程碑>-<任务>.md` | agent | 子代理任务交接报告 | 每个派发任务完成时 |
 | `../docs_human/overall.md` | 人 | 全局技术文档：从调用栈到细节设计（贴真实代码） | 每轮技术变动时（门禁 6） |
+| `../docs_human/sirius-design.md` | 人 | 设计愿景：理念与架构（纯思路，无代码实现；2026-08-19 由 docs_agent/ 移入，用户裁决） | 设计变更时 |
 | 根 `README.md` | 人/访客 | 项目一句话 + 文档入口 | 里程碑变更时 |
 | `sirius-brain/README.md`、`sirius-bridge/README.md` | agent | 各子项目使用细节 | 子项目行为变更时 |
 
@@ -89,3 +89,4 @@
 | 日期 | 修订 | 依据 |
 |---|---|---|
 | 2026-08-18 | 创建 | 用户确立的固定工作方式（原文落地）+ 本日文档基建轮实践 |
+| 2026-08-19 | sirius-design.md 归类调整：docs_agent/ → docs_human/（纯思路文档给人读，agent 读 sirius-technical.md 带技术路线版）；§8 文档地图同步 | 用户裁决 |
