@@ -115,11 +115,15 @@ public final class BridgeServer extends WebSocketServer {
         setReuseAddr(true);
         // Built-in tool implementations. M1-C adds screenshot/getStats/world.query,
         // M2-A the input.* primitives, M2-C getGuiState and M2-B events.subscribe
-        // by registering handlers here - dispatcher untouched.
+        // by registering handlers here - dispatcher untouched. M2-D adds look/
+        // lookAt, sharing the InputGuard (master switch + rate limit + permission
+        // tier) with the input.* tools.
         tools.register("capabilities/list", (ctx, params) ->
                 Json.capabilitiesResponse(ctx.id(), Capabilities.list(), Capabilities.PROTOCOL_VERSION));
         PerceptionTools.registerAll(tools);
-        InputTools.registerAll(tools, config);
+        InputGuard guard = new InputGuard(config);
+        InputTools.registerAll(tools, guard);
+        LookTools.registerAll(tools, guard);
         GuiTools.registerAll(tools);
         tools.register("events.subscribe", this::subscribeEvents);
     }

@@ -11,6 +11,8 @@
   客户端等待 hello 回应有超时上限、不阻塞任何后续调用
 - 工具调用 RPC：``call(method, params, timeout)``——ToolCallRequest 发、ToolCallResponse 收，
   uuid id 配对，超时抛 ``TimeoutError``，错误帧（-32601/-32602 等）抛 ``BridgeError``
+- 命令编排：``command(text)``——按人类时序串联 input.key T / input.text / input.key ENTER，
+  供大脑发送聊天与斜杠命令（M2-D）
 - 能力协商：``capabilities()`` → ``CapabilitiesInfo``（能力清单 + 协议版本）
 - NEKO 帧收发：``send_task(task, task_id)``、``on_task_finished`` 回调注册（五态枚举）
 - 事件订阅：后台接收循环把 notification 帧按 event 分发给已注册 handler，
@@ -81,6 +83,11 @@ EventHandler = Callable[[NotificationFrame], Any]
 TaskFinishedHandler = Callable[[TaskFinishedFrame], Any]
 
 HelloStatus = Literal["no-token", "acked", "ignored", "timeout"]
+
+# command() 用的 GLFW 键码（冻结 schema input.key.code 声明的是整数；键名是
+# Mod 侧的扩展。GLFW: 字母=大写 ASCII，ENTER=257——与 KeyCodes.java 一致）
+GLFW_KEY_T = 84
+GLFW_KEY_ENTER = 257
 
 
 class HelloFrame(BaseModel):
@@ -312,6 +319,33 @@ class BridgeClient:
             params.model_dump(mode="json", exclude_none=True),
             timeout,
         )
+
+    async def command(self, text: str, settle: float = 0.5,
+                      timeout: float | None = None) -> Any:
+        """聊天/命令编排：T 开聊天框 → 输入文本 → ENTER 发送 → 等待生效。
+
+        按"人类打命令"的时序串联三个 M2-A 原语（缺一步游戏都可能丢字）：
+        ``input.key {"code":84}``（T，默认 50ms tap）→ 0.4s 等聊天框真正获得焦点 →
+        ``input.text {"string": text}`` → 0.3s 等全部码点入框 →
+        ``input.key {"code":257}``（ENTER）发送 → ``settle`` 秒收尾。
+        code 用整数键码是冻结 schema 的形态（键名 "T"/"ENTER" 只是 Mod 侧扩展）。
+
+        - ``text`` 以 ``/`` 开头即命令（``/give @s diamond 1``），否则按普通聊天
+          消息发送——两者对客户端输入路径完全一致，本方法不做区分
+        - 返回最后一步（ENTER 的 input.key）的 result；任何一步被身体拒绝
+          （-32010 限频 / -32011 输入关闭 / -32012 权限分级 / -32602 参数）都抛
+          ``BridgeError``
+        - ``settle`` 默认 0.5s：命令生效后的世界变化（如 /give 的物品进背包）
+          需要服务器往返 + 客户端容器同步，立刻截图/查背包会读到旧状态——
+          Mindcraft CE 的 /give 即此模式。查结果建议再等 getStats/inventory 就绪
+        """
+        await self.call("input.key", {"code": GLFW_KEY_T}, timeout)
+        await asyncio.sleep(0.4)  # 等聊天框打开并获得焦点（E/T 开屏是下一帧的事）
+        await self.call("input.text", {"string": text}, timeout)
+        await asyncio.sleep(0.3)  # 等全部码点经 charTyped 入框
+        result = await self.call("input.key", {"code": GLFW_KEY_ENTER}, timeout)
+        await asyncio.sleep(settle)  # 等命令在服务器生效并同步回来
+        return result
 
     # ------------------------------------------------------------------ NEKO 帧
 

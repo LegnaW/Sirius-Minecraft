@@ -37,6 +37,8 @@ public final class Json {
     public static final int RATE_LIMITED = -32010;
     /** Input tools disabled via config (input_enabled = false). */
     public static final int INPUT_DISABLED = -32011;
+    /** Action denied by the permission tier (config permission; M2-D). */
+    public static final int PERMISSION_DENIED = -32012;
 
     private Json() {
     }

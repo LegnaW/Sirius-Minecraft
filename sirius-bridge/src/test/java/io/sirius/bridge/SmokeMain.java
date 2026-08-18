@@ -27,8 +27,10 @@ import java.util.Random;
  * and evidence file naming, event subscription matching, notification frame
  * assembly, the screenshot stream throttle state machine and the streaming
  * budget ladder, plus widget/slot node assembly, the node cap + truncation
- * and all three getGuiState response shapes - exactly the logic that would
- * otherwise only be verifiable inside a running Minecraft.
+ * and all three getGuiState response shapes, the M2-D look param validation,
+ * the eye->target rotation math (hand-computed cases), the permission-tier
+ * decision matrix and the config round-trip of the new keys - exactly the
+ * logic that would otherwise only be verifiable inside a running Minecraft.
  *
  * <p>Exit code 0 = all checks passed; any failure prints the check name and
  * exits 1.
@@ -52,6 +54,8 @@ public final class SmokeMain {
         streamThrottle();
         streamLadder();
         guiContracts();
+        lookContracts();
+        permissionContracts();
 
         System.out.println();
         System.out.println("smoke: " + passed + " passed, " + failures.size() + " failed");
@@ -319,6 +323,28 @@ public final class SmokeMain {
         Files.writeString(extraFile, "token = \"t\"\nsome_future_key = 42\nkeep_running_unfocused = false\n");
         check(!BridgeConfig.load(extraFile, new SecureRandom()).keepRunningUnfocused,
                 "config: unknown keys ignored, focus key still parsed");
+
+        // --- M2-D permission key: default full, round-trip, case, invalid fallback
+        Path permFile = dir.resolve("perm.toml");
+        BridgeConfig perm = BridgeConfig.load(permFile, new SecureRandom());
+        check(perm.permission == BridgeConfig.DEFAULT_PERMISSION
+                        && perm.permission == PermissionContracts.Tier.FULL,
+                "config: permission defaults to full (pre-M2-D behaviour)");
+        check(Files.readString(permFile).contains("permission = \"full\""),
+                "config: fresh save writes permission = \"full\" (auto-added to old files too)");
+        Files.writeString(permFile, "token = \"t\"\npermission = \"observe\"\n");
+        check(BridgeConfig.load(permFile, new SecureRandom()).permission == PermissionContracts.Tier.OBSERVE
+                        && Files.readString(permFile).contains("permission = \"observe\""),
+                "config: observe round-trips through save + reload");
+        Files.writeString(permFile, "token = \"t\"\npermission = INPUT_WORLD\n");
+        check(BridgeConfig.load(permFile, new SecureRandom()).permission
+                        == PermissionContracts.Tier.INPUT_WORLD,
+                "config: tier names parse case-insensitively");
+        Files.writeString(permFile, "token = \"t\"\npermission = sudo\n");
+        BridgeConfig badPerm = BridgeConfig.load(permFile, new SecureRandom());
+        check(badPerm.permission == BridgeConfig.DEFAULT_PERMISSION
+                        && badPerm.notes.contains("permission"),
+                "config: invalid permission falls back to full with a note");
     }
 
     private static void screenshotParams() throws Exception {
@@ -889,6 +915,163 @@ public final class SmokeMain {
         check("FakeWidget".equals(GuiContracts.typeName(new FakeWidget() {}.getClass()))
                         && "FakeWidget".equals(GuiContracts.typeName(FakeWidget.class)),
                 "gui: typeName falls back to the named superclass for anonymous widgets");
+    }
+
+    // ------------------------------------------------------------------ M2-D: look + permissions
+
+    private static void lookContracts() throws Exception {
+        // --- look params: frozen schema bounds are inclusive
+        LookContracts.LookParams p = validParams(() ->
+                LookContracts.lookParams(json("{\"yaw\":180,\"pitch\":-90}")));
+        check(p.yaw() == 180.0 && p.pitch() == -90.0,
+                "look: inclusive upper/lower bounds (180 / -90) accepted");
+        p = validParams(() -> LookContracts.lookParams(json("{\"yaw\":-180,\"pitch\":90}")));
+        check(p.yaw() == -180.0 && p.pitch() == 90.0,
+                "look: inclusive lower/upper bounds (-180 / 90) accepted");
+        p = validParams(() -> LookContracts.lookParams(json("{\"yaw\":0.5,\"pitch\":-0.25}")));
+        check(p.yaw() == 0.5 && p.pitch() == -0.25, "look: fractional angles accepted");
+        expectInvalid(() -> LookContracts.lookParams(json("{\"yaw\":180.5,\"pitch\":0}")),
+                "look: yaw 180.5 rejected");
+        expectInvalid(() -> LookContracts.lookParams(json("{\"yaw\":-180.5,\"pitch\":0}")),
+                "look: yaw -180.5 rejected");
+        expectInvalid(() -> LookContracts.lookParams(json("{\"yaw\":0,\"pitch\":90.5}")),
+                "look: pitch 90.5 rejected");
+        expectInvalid(() -> LookContracts.lookParams(json("{\"yaw\":0,\"pitch\":-90.5}")),
+                "look: pitch -90.5 rejected");
+        expectInvalid(() -> LookContracts.lookParams(json("{\"pitch\":0}")),
+                "look: missing yaw rejected");
+        expectInvalid(() -> LookContracts.lookParams(json("{\"yaw\":0}")),
+                "look: missing pitch rejected");
+        expectInvalid(() -> LookContracts.lookParams(json("{\"yaw\":\"10\",\"pitch\":0}")),
+                "look: string yaw rejected");
+        expectInvalid(() -> LookContracts.lookParams(json("{\"yaw\":null,\"pitch\":0}")),
+                "look: null yaw rejected");
+
+        // --- lookAt params
+        LookContracts.LookAtParams q = validParams(() ->
+                LookContracts.lookAtParams(json("{\"x\":1.5,\"y\":64,\"z\":-12.25}")));
+        check(q.x() == 1.5 && q.y() == 64.0 && q.z() == -12.25, "lookAt: numeric triple parsed");
+        expectInvalid(() -> LookContracts.lookAtParams(json("{\"x\":1,\"y\":2}")),
+                "lookAt: missing z rejected");
+        expectInvalid(() -> LookContracts.lookAtParams(json("{\"x\":1,\"y\":\"2\",\"z\":3}")),
+                "lookAt: non-number member rejected");
+        expectInvalid(() -> LookContracts.lookAtParams(json("{}")),
+                "lookAt: empty object rejected");
+
+        // --- rotationTowards: hand-computed cases (vanilla Entity.lookAt formula).
+        // yaw 0 = +Z (south), yaw -90 = +X (east), negative pitch = up - F3 axes.
+        double[] south = LookContracts.rotationTowards(0, 64, 0, 0, 64, 10);
+        check(south[0] == 0.0 && south[1] == 0.0 && Math.abs(south[2] - 10.0) < 1e-9,
+                "look math: +Z target -> yaw 0, pitch 0, distance 10");
+        double[] east = LookContracts.rotationTowards(0, 64, 0, 10, 64, 0);
+        check(east[0] == -90.0 && east[1] == 0.0, "look math: +X target -> yaw -90 (east)");
+        double[] north = LookContracts.rotationTowards(0, 64, 0, 0, 64, -10);
+        check(north[0] == -180.0 && north[1] == 0.0, "look math: -Z target -> yaw -180 (north)");
+        double[] up = LookContracts.rotationTowards(0, 64, 0, 0, 74, 0);
+        check(up[1] == -90.0 && up[0] == -90.0,
+                "look math: straight up -> pitch -90 (degenerate yaw -90, vanilla atan2(0,0)=0)");
+        double[] down = LookContracts.rotationTowards(0, 64, 0, 0, 54, 0);
+        check(down[1] == 90.0, "look math: straight down -> pitch +90");
+        double[] diag = LookContracts.rotationTowards(0, 64, 0, 3, 68, 4);
+        check(Math.abs(diag[0] - (-36.86989764584402)) < 1e-9
+                        && Math.abs(diag[1] - (-38.65980825409009)) < 1e-9
+                        && Math.abs(diag[2] - Math.sqrt(41.0)) < 1e-9,
+                "look math: 3-4-5 diagonal -> yaw atan2(4,3)-90, pitch -atan2(4,5), distance sqrt(41)");
+        // result yaw/pitch always inside the frozen schema bounds
+        boolean bounded = true;
+        for (int angle = 0; angle < 360; angle += 7) {
+            double rad = Math.toRadians(angle);
+            double[] r = LookContracts.rotationTowards(0, 64, 0, Math.cos(rad) * 10, Math.sin(rad) * 10,
+                    Math.sin(rad) * 5);
+            bounded &= r[0] >= LookContracts.YAW_MIN && r[0] <= LookContracts.YAW_MAX
+                    && r[1] >= LookContracts.PITCH_MIN && r[1] <= LookContracts.PITCH_MAX;
+        }
+        check(bounded, "look math: results stay within schema bounds for a full circle of targets");
+
+        // --- wrapDegrees (vanilla Mth.wrapDegrees boundary behaviour)
+        check(LookContracts.wrapDegrees(190.0) == -170.0 && LookContracts.wrapDegrees(-190.0) == 170.0
+                        && LookContracts.wrapDegrees(180.0) == -180.0 && LookContracts.wrapDegrees(-180.0) == -180.0
+                        && LookContracts.wrapDegrees(540.0) == -180.0 && LookContracts.wrapDegrees(0.0) == 0.0,
+                "look math: wrapDegrees matches vanilla (180 wraps to -180, [-180, 180) reduction)");
+
+        // --- result shapes
+        JsonObject look = LookContracts.lookResult(10, -5, -90, 30);
+        check(look.get("in_game").getAsBoolean() && look.get("looked").getAsBoolean()
+                        && look.get("yaw").getAsDouble() == -90.0 && look.get("pitch").getAsDouble() == 30.0
+                        && look.get("previous").getAsJsonObject().get("yaw").getAsDouble() == 10.0
+                        && look.get("previous").getAsJsonObject().get("pitch").getAsDouble() == -5.0,
+                "look results: lookResult carries new + previous rotation");
+        JsonObject lookAt = LookContracts.lookAtResult(1, 2, 3, -15.5, 22.25, 7.5);
+        check(lookAt.get("in_game").getAsBoolean() && lookAt.get("looked").getAsBoolean()
+                        && lookAt.get("target").getAsJsonObject().get("y").getAsDouble() == 2.0
+                        && lookAt.get("yaw").getAsDouble() == -15.5
+                        && lookAt.get("pitch").getAsDouble() == 22.25
+                        && lookAt.get("distance").getAsDouble() == 7.5,
+                "look results: lookAtResult carries target, rotation and distance");
+        JsonObject absent = LookContracts.notInGameLook();
+        check(!absent.get("in_game").getAsBoolean() && !absent.get("looked").getAsBoolean()
+                        && absent.keySet().size() == 2,
+                "look results: not-in-game shape is exactly {in_game:false, looked:false}");
+    }
+
+    private static void permissionContracts() {
+        PermissionContracts.Tier OBSERVE = PermissionContracts.Tier.OBSERVE;
+        PermissionContracts.Tier INPUT_GUI = PermissionContracts.Tier.INPUT_GUI;
+        PermissionContracts.Tier INPUT_WORLD = PermissionContracts.Tier.INPUT_WORLD;
+        PermissionContracts.Tier FULL = PermissionContracts.Tier.FULL;
+        PermissionContracts.Action INPUT = PermissionContracts.Action.INPUT;
+        PermissionContracts.Action LOOK = PermissionContracts.Action.LOOK;
+
+        // --- the decision matrix (tier x screen x action)
+        check(!PermissionContracts.allows(OBSERVE, true, INPUT)
+                        && !PermissionContracts.allows(OBSERVE, false, INPUT)
+                        && !PermissionContracts.allows(OBSERVE, true, LOOK)
+                        && !PermissionContracts.allows(OBSERVE, false, LOOK),
+                "permissions: observe denies input.* and look regardless of screen");
+        check(PermissionContracts.allows(INPUT_GUI, true, INPUT)
+                        && !PermissionContracts.allows(INPUT_GUI, false, INPUT)
+                        && !PermissionContracts.allows(INPUT_GUI, true, LOOK)
+                        && !PermissionContracts.allows(INPUT_GUI, false, LOOK),
+                "permissions: input_gui allows input.* ONLY with a screen, never look");
+        check(!PermissionContracts.allows(INPUT_WORLD, true, INPUT)
+                        && PermissionContracts.allows(INPUT_WORLD, false, INPUT)
+                        && PermissionContracts.allows(INPUT_WORLD, true, LOOK)
+                        && PermissionContracts.allows(INPUT_WORLD, false, LOOK),
+                "permissions: input_world allows input.* ONLY without a screen, always look");
+        check(PermissionContracts.allows(FULL, true, INPUT) && PermissionContracts.allows(FULL, false, INPUT)
+                        && PermissionContracts.allows(FULL, true, LOOK) && PermissionContracts.allows(FULL, false, LOOK),
+                "permissions: full allows everything (default = M2-A behaviour)");
+
+        // --- pre-flight veto helper (callers deny without a main-thread round trip)
+        check(PermissionContracts.deniedRegardlessOfScreen(OBSERVE, INPUT)
+                        && PermissionContracts.deniedRegardlessOfScreen(OBSERVE, LOOK)
+                        && PermissionContracts.deniedRegardlessOfScreen(INPUT_GUI, LOOK),
+                "permissions: screen-independent vetoes (observe any, input_gui look)");
+        check(!PermissionContracts.deniedRegardlessOfScreen(INPUT_GUI, INPUT)
+                        && !PermissionContracts.deniedRegardlessOfScreen(INPUT_WORLD, INPUT)
+                        && !PermissionContracts.deniedRegardlessOfScreen(INPUT_WORLD, LOOK)
+                        && !PermissionContracts.deniedRegardlessOfScreen(FULL, INPUT)
+                        && !PermissionContracts.deniedRegardlessOfScreen(FULL, LOOK),
+                "permissions: gui-gated combos need the live screen state");
+
+        // --- parse: case-insensitive + trimmed; unknown -> null (config falls back)
+        check(PermissionContracts.parse("observe") == OBSERVE
+                        && PermissionContracts.parse("INPUT_GUI") == INPUT_GUI
+                        && PermissionContracts.parse("  input_world ") == INPUT_WORLD
+                        && PermissionContracts.parse("full") == FULL,
+                "permissions: tier names parse case-insensitively (whitespace trimmed)");
+        check(PermissionContracts.parse("bogus") == null && PermissionContracts.parse("") == null
+                        && PermissionContracts.parse(null) == null,
+                "permissions: unknown/empty/null tier names rejected");
+
+        // --- message + config spelling
+        check("input_gui".equals(INPUT_GUI.configName()) && "observe".equals(OBSERVE.configName()),
+                "permissions: config spelling is lowercase");
+        String message = PermissionContracts.deniedMessage(OBSERVE, false, INPUT);
+        check(message.startsWith("permission_denied")
+                        && message.contains("observe")
+                        && message.contains("sirius_bridge.toml"),
+                "permissions: deniedMessage names the tier and the config key");
     }
 
     /** Named stand-in for an AbstractWidget subclass (typeName smoke checks). */

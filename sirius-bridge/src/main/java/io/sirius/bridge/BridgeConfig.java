@@ -28,6 +28,11 @@ public final class BridgeConfig {
      * runtime (the AI-plays-human-watches scenario dies without this).
      */
     public static final boolean DEFAULT_KEEP_RUNNING_UNFOCUSED = true;
+    /**
+     * Default for {@code permission}: {@code full} - every acting tool allowed,
+     * byte-identical to the pre-M2-D behaviour (tiers are strictly opt-in).
+     */
+    public static final PermissionContracts.Tier DEFAULT_PERMISSION = PermissionContracts.Tier.FULL;
 
     /** Resolved settings. */
     public final int port;
@@ -46,12 +51,19 @@ public final class BridgeConfig {
      * at startup; the user's {@code options.txt} file is never written by us.
      */
     public final boolean keepRunningUnfocused;
+    /**
+     * The M2-D permission tier (permission): {@code observe} / {@code input_gui}
+     * / {@code input_world} / {@code full} (default - backward compatible, every
+     * acting tool allowed). See {@link PermissionContracts} for the matrix.
+     */
+    public final PermissionContracts.Tier permission;
     /** Human-readable notes gathered while loading (logged by the caller, never fatal). */
     public final String notes;
 
     private BridgeConfig(int port, String token, boolean tokenGenerated,
                          boolean inputEnabled, int rateLimitPerSec, boolean guiClickEvidence,
-                         boolean keepRunningUnfocused, String notes) {
+                         boolean keepRunningUnfocused, PermissionContracts.Tier permission,
+                         String notes) {
         this.port = port;
         this.token = token;
         this.tokenGenerated = tokenGenerated;
@@ -59,6 +71,7 @@ public final class BridgeConfig {
         this.rateLimitPerSec = rateLimitPerSec;
         this.guiClickEvidence = guiClickEvidence;
         this.keepRunningUnfocused = keepRunningUnfocused;
+        this.permission = permission;
         this.notes = notes;
     }
 
@@ -73,6 +86,7 @@ public final class BridgeConfig {
         int rateLimitPerSec = DEFAULT_RATE_LIMIT_PER_SEC;
         boolean guiClickEvidence = true;
         boolean keepRunningUnfocused = DEFAULT_KEEP_RUNNING_UNFOCUSED;
+        PermissionContracts.Tier permission = DEFAULT_PERMISSION;
         StringBuilder notes = new StringBuilder();
 
         if (Files.exists(file)) {
@@ -145,6 +159,16 @@ public final class BridgeConfig {
                                 notes.append("keep_running_unfocused not true/false: ").append(value).append("; ");
                             }
                         }
+                        // M2-D permission tier - appended, existing keys keep their meaning.
+                        case "permission" -> {
+                            PermissionContracts.Tier parsed = PermissionContracts.parse(value);
+                            if (parsed != null) {
+                                permission = parsed;
+                            } else {
+                                notes.append("invalid permission ").append(value)
+                                        .append(", using default ").append(DEFAULT_PERMISSION.configName()).append("; ");
+                            }
+                        }
                         default -> {
                         }
                     }
@@ -164,7 +188,8 @@ public final class BridgeConfig {
         }
 
         BridgeConfig config = new BridgeConfig(port, token, generated,
-                inputEnabled, rateLimitPerSec, guiClickEvidence, keepRunningUnfocused, notes.toString().trim());
+                inputEnabled, rateLimitPerSec, guiClickEvidence, keepRunningUnfocused, permission,
+                notes.toString().trim());
         config.save(file);
         return config;
     }
@@ -194,13 +219,24 @@ public final class BridgeConfig {
                 #                     unfocused. options.txt is never written by the
                 #                     bridge; to make it permanent manually add
                 #                     "pauseOnLostFocus:false" there instead.
+                # permission        : which acting tools the bridge may run (M2-D).
+                #                     observe    = read-only; input.* and look/lookAt
+                #                                 answer -32012.
+                #                     input_gui  = input.* only while a GUI screen is
+                #                                 open; look/lookAt denied.
+                #                     input_world= input.* only while NO GUI is open;
+                #                                 look/lookAt allowed.
+                #                     full       = everything allowed (default,
+                #                                 identical to the pre-M2-D behaviour).
                 port = %d
                 token = "%s"
                 input_enabled = %s
                 rate_limit_per_sec = %d
                 gui_click_evidence = %s
                 keep_running_unfocused = %s
-                """.formatted(port, token, inputEnabled, rateLimitPerSec, guiClickEvidence, keepRunningUnfocused);
+                permission = "%s"
+                """.formatted(port, token, inputEnabled, rateLimitPerSec, guiClickEvidence,
+                keepRunningUnfocused, permission.configName());
         try {
             Files.createDirectories(file.getParent());
             Files.writeString(file, content, StandardCharsets.UTF_8);

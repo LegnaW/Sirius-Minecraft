@@ -259,6 +259,57 @@ class TestToolCalls:
         asyncio.run(scenario())
 
 
+class TestCommand:
+    """M2-D command() 编排：T → text → ENTER 的出站顺序与结果/错误语义（对 mock 回环）。"""
+
+    def test_command_sends_t_text_enter_in_order(self):
+        """出站帧顺序必须严格是 input.key T(84) → input.text → input.key ENTER(257)；
+        返回值为最后一步（ENTER）的 result（mock 未编排工具回通用成功，params 被 echo）。
+        code 用整数键码——冻结 schema input.key.code 声明的是 integer。"""
+
+        async def scenario():
+            sent: list[dict] = []
+            async with MockBridgeServer(port=0) as server:
+                async with BridgeClient(server.url) as client:
+                    original_send = client._send
+
+                    async def recording_send(frame):
+                        sent.append(json.loads(frame.model_dump_json()))
+                        await original_send(frame)
+
+                    client._send = recording_send
+                    result = await client.command("/give @s diamond 1", settle=0.05)
+            assert [f["method"] for f in sent if f.get("type") == "request"] == [
+                "input.key", "input.text", "input.key"]
+            key_frames = [f for f in sent if f.get("method") == "input.key"]
+            assert key_frames[0]["params"] == {"code": 84}      # GLFW T
+            assert key_frames[1]["params"] == {"code": 257}     # GLFW ENTER
+            text_frames = [f for f in sent if f.get("method") == "input.text"]
+            assert text_frames[0]["params"] == {"string": "/give @s diamond 1"}
+            assert result["ok"] is True            # 最后一步 input.key 的通用成功
+            assert result["method"] == "input.key"
+            assert result["echo"] == {"code": 257}
+
+        asyncio.run(scenario())
+
+    def test_command_plain_chat_and_error_propagation(self):
+        """无斜杠前缀按普通聊天同样处理（时序一致）；任一步被身体拒绝即抛 BridgeError。"""
+
+        async def scenario():
+            script = MockScript(tools={
+                "input.key": ScriptedToolResponse(
+                    error={"code": -32012, "message": "permission_denied: observe"}),
+            })
+            async with MockBridgeServer(script, port=0) as server:
+                async with BridgeClient(server.url) as client:
+                    with pytest.raises(BridgeError) as excinfo:
+                        await client.command("你好，世界", settle=0.05)
+            assert excinfo.value.code == -32012
+            assert "permission_denied" in excinfo.value.message
+
+        asyncio.run(scenario())
+
+
 class TestHello:
     def test_token_hello_interops_with_mock(self):
         """token hello 不破坏与 mock 的互通：mock 回 -32600 未知帧错误，

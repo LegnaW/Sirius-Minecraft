@@ -52,8 +52,12 @@ import java.util.function.Supplier;
  * limits all four tools combined to {@code rate_limit_per_sec} calls/s
  * (default 20) - over-rate calls answer error {@code -32010 rate_limited};
  * {@code input_enabled = false} disables all four (error {@code -32011});
- * every call is audited to {@code logs/sirius_bridge.log}; and a GUI click
- * (a Screen being open) first saves a small JPEG evidence shot to
+ * the M2-D permission tier can deny all input.* ({@code observe}) or gate
+ * them on the live screen state ({@code input_gui}/{@code input_world},
+ * error {@code -32012} - the screen check runs INSIDE the main-thread task,
+ * because the screen can change any tick); every call is audited to
+ * {@code logs/sirius_bridge.log}; and a GUI click (a Screen being open)
+ * first saves a small JPEG evidence shot to
  * {@code logs/sirius_evidence/} (config {@code gui_click_evidence}).
  */
 final class InputTools {
@@ -89,8 +93,7 @@ final class InputTools {
     }
 
     /** Registers the four tools; called once from the BridgeServer constructor. */
-    static void registerAll(ToolRegistry tools, BridgeConfig config) {
-        InputGuard guard = new InputGuard(config);
+    static void registerAll(ToolRegistry tools, InputGuard guard) {
         tools.register("input.key", (ctx, params) -> key(ctx, params, guard));
         tools.register("input.text", (ctx, params) -> text(ctx, params, guard));
         tools.register("input.mouseMove", (ctx, params) -> mouseMove(ctx, params, guard));
@@ -115,6 +118,11 @@ final class InputTools {
             ctx.audit("INPUT", summary("input.key", p.keyName()) + " result=input_disabled");
             return Json.errorResponse(ctx.id(), Json.INPUT_DISABLED, InputContracts.inputDisabledMessage(), null);
         }
+        // Tier veto that does not depend on the live screen state (observe):
+        // deny pre-flight, before burning a rate-limit token.
+        if (PermissionContracts.deniedRegardlessOfScreen(guard.tier(), PermissionContracts.Action.INPUT)) {
+            return permissionDenied(ctx, guard, "input.key", p.keyName(), null);
+        }
         if (!guard.tryAcquire()) {
             ctx.audit("INPUT", summary("input.key", p.keyName()) + " result=rate_limited");
             return Json.errorResponse(ctx.id(), Json.RATE_LIMITED,
@@ -122,14 +130,24 @@ final class InputTools {
         }
 
         final long effectiveDurationMs = p.durationMs() > 0 ? p.durationMs() : InputContracts.DEFAULT_TAP_MS;
-        final boolean screenOpen = callOnMainThread(ctx, () -> {
+        final Object outcome = callOnMainThread(ctx, () -> {
             Minecraft mc = Minecraft.getInstance();
+            // Screen-dependent tiers (input_gui/input_world) decide HERE - the
+            // screen can change any tick, so the gate belongs inside the task.
+            boolean screenOpen = mc.screen != null;
+            if (!PermissionContracts.allows(guard.tier(), screenOpen, PermissionContracts.Action.INPUT)) {
+                return new PermissionDeniedMarker(screenOpen);
+            }
             int scancode = Math.max(0, GLFW.glfwGetKeyScancode(p.glfwKey()));
             // PRESS through the real callback: screen hooks -> KeyMapping.set/click -> NeoForge onKeyInput
             mc.keyboardHandler.keyPress(mc.getWindow().getWindow(), p.glfwKey(), scancode,
                     InputConstants.PRESS, p.modifiers());
-            return mc.screen != null;
+            return Boolean.valueOf(screenOpen);
         });
+        if (outcome instanceof PermissionDeniedMarker denied) {
+            return permissionDenied(ctx, guard, "input.key", p.keyName(), denied.screenOpen());
+        }
+        final boolean screenOpen = (Boolean) outcome;
 
         scheduleKeyRelease(p, effectiveDurationMs);
 
@@ -173,6 +191,9 @@ final class InputTools {
             ctx.audit("INPUT", summary("input.text", p.codepoints() + "cp") + " result=input_disabled");
             return Json.errorResponse(ctx.id(), Json.INPUT_DISABLED, InputContracts.inputDisabledMessage(), null);
         }
+        if (PermissionContracts.deniedRegardlessOfScreen(guard.tier(), PermissionContracts.Action.INPUT)) {
+            return permissionDenied(ctx, guard, "input.text", p.codepoints() + "cp", null);
+        }
         if (!guard.tryAcquire()) {
             ctx.audit("INPUT", summary("input.text", p.codepoints() + "cp") + " result=rate_limited");
             return Json.errorResponse(ctx.id(), Json.RATE_LIMITED,
@@ -184,17 +205,25 @@ final class InputTools {
         }
 
         final String text = p.text();
-        final int delivered = callOnMainThread(ctx, () -> {
+        final Object outcome = callOnMainThread(ctx, () -> {
             Minecraft mc = Minecraft.getInstance();
+            boolean screenOpen = mc.screen != null;
+            if (!PermissionContracts.allows(guard.tier(), screenOpen, PermissionContracts.Action.INPUT)) {
+                return new PermissionDeniedMarker(screenOpen);
+            }
             // charTyped only reaches an open Screen (chat/sign/search fields); overlay blocks it too.
             if (mc.screen == null || mc.getOverlay() != null) {
-                return 0;
+                return Integer.valueOf(0);
             }
             long window = mc.getWindow().getWindow();
             text.codePoints().forEachOrdered(codepoint ->
                     dispatch(CHAR_TYPED, mc.keyboardHandler, window, codepoint, 0));
-            return text.codePointCount(0, text.length());
+            return Integer.valueOf(text.codePointCount(0, text.length()));
         });
+        if (outcome instanceof PermissionDeniedMarker denied) {
+            return permissionDenied(ctx, guard, "input.text", p.codepoints() + "cp", denied.screenOpen());
+        }
+        final int delivered = (Integer) outcome;
 
         ctx.audit("INPUT", summary("input.text", p.codepoints() + "cp") + " delivered=" + delivered
                 + " result=" + (delivered == p.codepoints() ? "ok" : "no_screen"));
@@ -214,6 +243,9 @@ final class InputTools {
             ctx.audit("INPUT", summary("input.mouseMove", p.x() + "," + p.y()) + " result=input_disabled");
             return Json.errorResponse(ctx.id(), Json.INPUT_DISABLED, InputContracts.inputDisabledMessage(), null);
         }
+        if (PermissionContracts.deniedRegardlessOfScreen(guard.tier(), PermissionContracts.Action.INPUT)) {
+            return permissionDenied(ctx, guard, "input.mouseMove", p.x() + "," + p.y(), null);
+        }
         if (!guard.tryAcquire()) {
             ctx.audit("INPUT", summary("input.mouseMove", p.x() + "," + p.y()) + " result=rate_limited");
             return Json.errorResponse(ctx.id(), Json.RATE_LIMITED,
@@ -224,8 +256,12 @@ final class InputTools {
                     "MouseHandler.onMove is not reachable on this client", null);
         }
 
-        final double[] moved = callOnMainThread(ctx, () -> {
+        final Object outcome = callOnMainThread(ctx, () -> {
             Minecraft mc = Minecraft.getInstance();
+            boolean screenOpen = mc.screen != null;
+            if (!PermissionContracts.allows(guard.tier(), screenOpen, PermissionContracts.Action.INPUT)) {
+                return new PermissionDeniedMarker(screenOpen);
+            }
             Window window = mc.getWindow();
             // clamp to the client area - a human cursor cannot be outside it
             double cx = Math.max(0.0, Math.min(p.x(), window.getScreenWidth()));
@@ -234,8 +270,12 @@ final class InputTools {
             // the GUI coordinate the game derives from this position (same formula as MouseHandler.onPress)
             double guiX = cx * window.getGuiScaledWidth() / window.getScreenWidth();
             double guiY = cy * window.getGuiScaledHeight() / window.getScreenHeight();
-            return new double[]{cx, cy, guiX, guiY, mc.screen != null ? 1 : 0};
+            return new double[]{cx, cy, guiX, guiY, screenOpen ? 1 : 0};
         });
+        if (outcome instanceof PermissionDeniedMarker denied) {
+            return permissionDenied(ctx, guard, "input.mouseMove", p.x() + "," + p.y(), denied.screenOpen());
+        }
+        final double[] moved = (double[]) outcome;
 
         ctx.audit("INPUT", summary("input.mouseMove", p.x() + "," + p.y()) + " delivered="
                 + (int) moved[0] + "," + (int) moved[1] + " screen=" + (moved[4] > 0) + " result=ok");
@@ -256,6 +296,9 @@ final class InputTools {
             ctx.audit("INPUT", summary("input.click", "btn" + p.button()) + " result=input_disabled");
             return Json.errorResponse(ctx.id(), Json.INPUT_DISABLED, InputContracts.inputDisabledMessage(), null);
         }
+        if (PermissionContracts.deniedRegardlessOfScreen(guard.tier(), PermissionContracts.Action.INPUT)) {
+            return permissionDenied(ctx, guard, "input.click", "btn" + p.button(), null);
+        }
         if (!guard.tryAcquire()) {
             ctx.audit("INPUT", summary("input.click", "btn" + p.button()) + " result=rate_limited");
             return Json.errorResponse(ctx.id(), Json.RATE_LIMITED,
@@ -266,21 +309,30 @@ final class InputTools {
                     "MouseHandler.onPress is not reachable on this client", null);
         }
 
-        // One main-thread task: evidence grab (Screen open + evidence on) then the first PRESS.
-        final ClickStart start = callOnMainThread(ctx, () -> {
+        // One main-thread task: permission gate, evidence grab (Screen open +
+        // evidence on) then the first PRESS.
+        final Object outcome = callOnMainThread(ctx, () -> {
             Minecraft mc = Minecraft.getInstance();
+            boolean screenOpen = mc.screen != null;
+            if (!PermissionContracts.allows(guard.tier(), screenOpen, PermissionContracts.Action.INPUT)) {
+                return new PermissionDeniedMarker(screenOpen);
+            }
             long window = mc.getWindow().getWindow();
             BufferedImage shot = null;
             String screenName = null;
-            if (mc.screen != null) {
+            if (screenOpen) {
                 screenName = mc.screen.getClass().getSimpleName();
-                if (guard.guiClickEvidence) {
+                if (guard.guiClickEvidence()) {
                     shot = PerceptionTools.grabScreen(); // render thread: pixel download only
                 }
             }
             dispatch(ON_MOUSE_PRESS, mc.mouseHandler, window, p.button(), InputConstants.PRESS, 0);
             return new ClickStart(shot, screenName);
         });
+        if (outcome instanceof PermissionDeniedMarker denied) {
+            return permissionDenied(ctx, guard, "input.click", "btn" + p.button(), denied.screenOpen());
+        }
+        final ClickStart start = (ClickStart) outcome;
 
         Evidence evidence = saveEvidence(start, p);
 
@@ -365,29 +417,29 @@ final class InputTools {
 
     // ------------------------------------------------------------------ guard + helpers
 
-    /** Shared enable flag + token bucket for all four input tools. */
-    private static final class InputGuard {
-        private final boolean enabled;
-        private final boolean guiClickEvidence;
-        private final TokenBucket bucket;
+    /**
+     * Marker a main-thread task RETURNS (never throws - throwing would map to
+     * -32603) when the permission tier vetoes the injection after the screen
+     * state was read on the main thread. Carries that screen state for the
+     * audit line / error message.
+     */
+    record PermissionDeniedMarker(boolean screenOpen) {
+    }
 
-        InputGuard(BridgeConfig config) {
-            this.enabled = config.inputEnabled;
-            this.guiClickEvidence = config.guiClickEvidence;
-            this.bucket = new TokenBucket(config.rateLimitPerSec);
-        }
-
-        boolean enabled() {
-            return enabled;
-        }
-
-        boolean tryAcquire() {
-            return bucket.tryAcquire(1);
-        }
-
-        int limitPerSecond() {
-            return bucket.refillPerSecond();
-        }
+    /**
+     * The {@code -32012} denial: INPUT_DENIED audit line mirroring the other
+     * guard outcomes plus the standard error frame. {@code screenOpen} is
+     * {@code null} for pre-flight vetoes (observe tier) where the live screen
+     * state was never read.
+     */
+    private static JsonObject permissionDenied(ToolContext ctx, InputGuard guard, String method,
+                                               String detail, Boolean screenOpen) {
+        ctx.audit("INPUT_DENIED", "reason=permission tier=" + guard.tier().configName()
+                + " " + summary(method, detail)
+                + (screenOpen != null ? " screen=" + screenOpen : ""));
+        boolean screen = screenOpen != null && screenOpen;
+        return Json.errorResponse(ctx.id(), Json.PERMISSION_DENIED,
+                PermissionContracts.deniedMessage(guard.tier(), screen, PermissionContracts.Action.INPUT), null);
     }
 
     /** Makes a private callback reachable; returns null (and logs) when the signature is absent. */

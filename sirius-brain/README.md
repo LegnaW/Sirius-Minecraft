@@ -149,6 +149,7 @@ async with client:
     info = await client.capabilities()          # 能力协商：能力清单 + protocol_version
     stats = await client.call("getStats")       # 工具调用 RPC（id 自动配对）
     await client.subscribe_events(["fire"])     # events.subscribe 工具的便捷封装
+    await client.command("/give @s diamond 1")  # 聊天/命令编排：input.key T → input.text → ENTER（M2-D）
     task_id = await client.send_task("挖一组铁矿")  # NEKO task 帧（fire-and-forget）
 ```
 
@@ -181,4 +182,4 @@ BridgeConfig.from_env()                      # SIRIUS_BRIDGE_URL / _TOKEN / _REQ
 
 ### 测试
 
-`tests/test_bridge_client.py` 对 mock 跑真实回环：能力协商往返、工具调用（result/error/timeout 三路）、token hello 与 mock 互通、task_finished 回调（特殊字符 task_id + 五态枚举全覆盖）、事件推送（seq 递增）、未知帧忽略 + seq 乱序容忍（对裸推送服务注入）、断线重连与在途请求失败、配置装载（JSON/环境变量）。
+`tests/test_bridge_client.py` 对 mock 跑真实回环：能力协商往返、工具调用（result/error/timeout 三路）、token hello 与 mock 互通、task_finished 回调（特殊字符 task_id + 五态枚举全覆盖）、事件推送（seq 递增）、未知帧忽略 + seq 乱序容忍（对裸推送服务注入）、断线重连与在途请求失败、命令编排（T→text→ENTER 出站顺序 + 错误透传，M2-D）、配置装载（JSON/环境变量）。

@@ -2,12 +2,14 @@
 
 NeoForge mod running on the **real Minecraft client**, acting as the "eyes and hands" of the Sirius AI brain: screenshot capture, input injection, and event push. See `../docs_agent/sirius-technical.md` §8.2 for the full spec.
 
-> Current status: **M2-C GUI state implemented** - `getGuiState` reports the
-> open screen's widget tree and container slots as structured JSON. Together
-> with the M2-A input primitives (`input.*`), the M1-C perception tools
-> (`screenshot`, `getStats`, `world.query`) and the M2-B event push channel
-> the bridge has "eyes", "hands", a passive attention channel and GUI
-> comprehension. `look*` and `events.watch` land in M3+.
+> Current status: **M2-D look + permission tiers implemented** - `look` /
+> `lookAt` rotate the player's view absolutely, and a `permission` config
+> tier gates every acting tool (`observe` / `input_gui` / `input_world` /
+> `full`). Together with the M2-A input primitives (`input.*`), the M1-C
+> perception tools (`screenshot`, `getStats`, `world.query`), the M2-B event
+> push channel and the M2-C GUI state the bridge has "eyes", "hands", a
+> passive attention channel, GUI comprehension and a gaze. `events.watch`
+> lands in M3+.
 
 ## Versions
 
@@ -42,7 +44,8 @@ When the client reaches the title screen, the mod starts a WebSocket server:
   and restarting the game.
 - **Config**: `config/sirius_bridge.toml` with `port` (default 8765), `token`,
   and (M2-A) `input_enabled` / `rate_limit_per_sec` / `gui_click_evidence`
-  (see below), plus (M2-A2) `keep_running_unfocused`.
+  (see below), plus (M2-A2) `keep_running_unfocused` and (M2-D)
+  `permission`.
 - **Audit log**: `logs/sirius_bridge.log` - one line per server start/stop,
   connect/disconnect, hello success/failure and every request (with the
   resulting error code); every `input.*` call additionally writes an
@@ -58,11 +61,16 @@ When the client reaches the title screen, the mod starts a WebSocket server:
 ```toml
 port = 8765
 token = "<64 hex chars>"
-input_enabled = true          # master switch for input.* (false -> error -32011)
+input_enabled = true          # master switch for input.* + look* (false -> error -32011)
 rate_limit_per_sec = 20       # combined input.* calls/s (token bucket, 1..1000)
 gui_click_evidence = true     # screenshot every GUI click -> logs/sirius_evidence/
 keep_running_unfocused = true # disable vanilla pause-on-lost-focus at runtime (M2-A2)
+permission = "full"           # M2-D tier: observe / input_gui / input_world / full
 ```
+
+Missing keys are auto-added to an existing file on the next launch (the file
+is rewritten with defaults + comments, unknown keys ignored); invalid values
+fall back to the default plus a note in the log.
 
 ### Currently implemented frames
 
@@ -74,6 +82,7 @@ keep_running_unfocused = true # disable vanilla pause-on-lost-focus at runtime (
 | `request` `getStats` | see "The perception tools" below |
 | `request` `world.query` | see "The perception tools" below |
 | `request` `input.key` / `input.text` / `input.mouseMove` / `input.click` | see "The input tools" below |
+| `request` `look` / `lookAt` | see "The look tools" below |
 | `request` `getGuiState` | see "The GUI state tool" below |
 | `request` `events.subscribe` | see "The event push channel" below |
 | `request` any other method | `-32601` `not implemented: <method>` (until M3) |
@@ -284,6 +293,8 @@ All four tools share one token bucket: `rate_limit_per_sec` calls/s
 
 - `-32010 rate_limited` (retry shortly),
 - `-32011 input_disabled` when `input_enabled = false`,
+- `-32012 permission_denied` when the `permission` tier vetoes the call
+  (M2-D, see below),
 - `-32602` for schema violations,
 - `-32603` when the main thread does not drain within 10 s (iconified
   window) or a callback could not be reached.
@@ -354,6 +365,88 @@ Iconified (minimized) remains the hard case from M1-C/M2-A: the render loop
 stops draining `Minecraft.execute` tasks, so tools answer `-32603` after the
 10 s latch timeout instead of hanging. Unfocused-but-visible is the supported
 "human alt-tabs away" case.
+
+## The look tools (M2-D)
+
+`look` and `lookAt` set the player's view rotation absolutely - the gaze to
+pair with the M2-A hands (aiming, pathing, "look at what I'm talking about").
+
+- **Action layer, not event layer** (deliberate deviation from M2-A's
+  injection principle): view rotation has no GLFW event-callback entry a
+  human could produce for us - humans move the mouse, which becomes a
+  *delta*. `input.mouseMove` turning requires the window focused AND the
+  mouse grabbed (M2-A2 finding) and composes deltas; `look` instead writes
+  the rotation directly with the exact statement sequence of vanilla's own
+  `Entity.lookAt(Anchor, Vec3)` (1.21.1 sources): `setYRot`/`setXRot` (the
+  NaN-guarded setters), `yRotO`/`xRotO` kept in sync (otherwise the next
+  rendered frame smears from the old rotation), plus `setYHeadRot` so body
+  and head do not decouple for a frame. A `LocalPlayer` auto-syncs rotation
+  to the server next tick via `LocalPlayer.sendPosition` (PosRot packets) -
+  no packet work on our side.
+- **`look({yaw, pitch})`** - degrees, frozen-schema bounds `-180..180` /
+  `-90..90` (violations `-32602`). Yaw 0 = +Z (south), -90 = +X (east),
+  180/-180 = -Z (north); negative pitch is up - the F3 debug axes. Result:
+
+```json
+{"in_game": true, "looked": true, "yaw": -90.0, "pitch": 12.5,
+ "previous": {"yaw": 37.0, "pitch": 0.0}}
+```
+
+- **`lookAt({x, y, z})`** - world position to face. The rotation is vanilla's
+  `Entity.lookAt` math inverted-exactly: from the eye position
+  (`getEyePosition()`, i.e. feet + eye height) to the target,
+  `yaw = atan2(dz, dx) - 90°`, `pitch = -atan2(dy, horizontal)` (all wrapped
+  into the schema bounds); `distance` is the Euclidean eye-to-target
+  distance. Result:
+
+```json
+{"in_game": true, "looked": true, "target": {"x": 10.0, "y": 65.0, "z": -3.5},
+ "yaw": 14.04, "pitch": -11.31, "distance": 12.08}
+```
+
+- Not in a world (title screen): `{"in_game": false, "looked": false}` - not
+  an error, the getStats convention.
+- Guard rails: `input_enabled = false` disables both (`-32011` - looking
+  around IS acting); the permission tier treats them as world-level actions
+  (`observe`/`input_gui` deny with `-32012`, see below). They are
+  deliberately NOT charged against the input token bucket - a one-field
+  write cannot flood the event pipeline, and M4 aiming will want high look
+  rates without starving `input.*`.
+- Known quirks: `lookAt` at the eye position itself is degenerate
+  (`atan2(0,0)=0` -> yaw -90, pitch 0 - the same harmless answer vanilla's
+  own `lookAt` gives); the rotation applies next rendered frame; while dead
+  the rotation still writes but the server may ignore it.
+
+## Permission tiers (M2-D)
+
+`permission` in `config/sirius_bridge.toml` gates every ACTING tool
+(`input.*`, `look`, `lookAt`); perception (`screenshot`/`getStats`/
+`world.query`/`getGuiState`), `events.subscribe` and capabilities are always
+allowed. Values (case-insensitive; anything else falls back to the default
+plus a note):
+
+| Tier | `input.*` | `look`/`lookAt` |
+|---|---|---|
+| `observe` | denied (`-32012`) | denied (`-32012`) |
+| `input_gui` | allowed ONLY while a GUI screen is open | denied (`-32012`) |
+| `input_world` | allowed ONLY while NO GUI is open | allowed |
+| `full` (default) | allowed | allowed |
+
+- **Default `full` preserves M2-A behaviour byte-identically** - tiers are
+  strictly opt-in, and the key is auto-added to existing configs on the next
+  launch.
+- The GUI-open test uses the live `mc.screen` state read on the client main
+  thread *inside* each tool's existing main-thread task (the screen can
+  change any tick; a pre-flight check on the WebSocket thread would race).
+  For `input.key`/`input.text`/`input.mouseMove` under `input_gui` a
+  screen-less keypress would go to the KeyMapping/world - i.e. act outside
+  the GUI - so it is denied; `input.click` already branched on
+  `mc.screen != null` (GUI click vs attack/use).
+- `observe` denies pre-flight (no rate-limit token burned, no main-thread
+  round trip); screen-dependent verdicts deny from inside the task. Denials
+  return error `-32012` (not `-32603`) and write an
+  `INPUT_DENIED reason=permission tier=...` audit line to
+  `logs/sirius_bridge.log`.
 
 ## The event push channel (M2-B)
 
@@ -544,16 +637,18 @@ configuration instead.
 
 `build` also runs the **smoke test** (`gradlew smokeTest`, wired into
 `check`): an in-process `main()` that exercises the pure halves of the
-perception, input, event-push and GUI state code - parameter validation,
-bbox cropping, both JPEG budget ladders, response assembly, block scan and
-entity filtering, the key-name table, the rate-limiter token bucket,
-evidence file naming, the config parser (incl. `keep_running_unfocused`
-defaults/round-trips), subscription matching, notification frame assembly,
-the stream throttle state machine (injected clock), the streaming ladder,
-plus widget/slot node assembly, the 512-node cap, slot role classification
-and all three getGuiState response shapes - with no game launched (200
-checks; a 4K incompressible-noise image verifies the 2MB RPC degrade, an
-800x600 one the 100KB stream ladder).
+perception, input, event-push, GUI state and look code - parameter
+validation, bbox cropping, both JPEG budget ladders, response assembly,
+block scan and entity filtering, the key-name table, the rate-limiter token
+bucket, evidence file naming, the config parser (incl.
+`keep_running_unfocused` and `permission` defaults/round-trips),
+subscription matching, notification frame assembly, the stream throttle
+state machine (injected clock), the streaming ladder, plus widget/slot node
+assembly, the 512-node cap, slot role classification, all three getGuiState
+response shapes, the look rotation math (hand-computed cases against the
+vanilla formula) and the permission-tier decision matrix - with no game
+launched (241 checks; a 4K incompressible-noise image verifies the 2MB RPC
+degrade, an 800x600 one the 100KB stream ladder).
 
 ## Deploy to test client
 
@@ -589,10 +684,14 @@ src/main/java/io/sirius/bridge/
     InputTools.java       M2-A shells: event-callback injection, GUI click evidence (main thread)
     EventPusher.java      M2-B shell: notification emit choke point (chat/gui/danger/screenshot stream)
     GuiTools.java         M2-C shell: screen widget tree + container slot reads (main thread)
+    LookTools.java        M2-D shells: absolute view rotation via the vanilla lookAt statement sequence
+    InputGuard.java       shared guard rails: input_enabled + rate limit + evidence flag + permission tier
     ToolContracts.java    pure: param validation + response assembly + world scan logic
     InputContracts.java   pure: input param validation + result assembly + evidence naming
     GuiContracts.java     pure: GUI state node/slot assembly, cap + truncation, response shapes
     EventsContracts.java  pure: event levels, subscription matching, notification shape, stream throttle
+    LookContracts.java    pure: look/lookAt validation, vanilla rotation math, response shapes
+    PermissionContracts.java  pure: M2-D permission tier matrix (tier x screen-state x action)
     KeyCodes.java         pure: logical key names -> GLFW keycodes (1.21.1 InputConstants values)
     TokenBucket.java      pure: input rate limiter (clock injectable for the smoke test)
     ImageOps.java         pure: crop / JPEG encode / size-budget ladder / base64
@@ -605,13 +704,14 @@ src/main/resources/assets/sirius_bridge/   Asset placeholder
 
 ## Next steps (per §8.2 of the technical spec)
 
-- M3+: `look`/`lookAt`, `events.watch` (stat/condition watches with
-  hysteresis + cooldown - deliberately NOT implemented in M2-B).
+- M3+: `events.watch` (stat/condition watches with hysteresis + cooldown -
+  deliberately NOT implemented in M2-B).
 - Natural M2-B extensions: more event sources just call
   `EventPusher.push` (one method, thread-safe); a reconnect replay could
   consume the stream ring buffer; the danger catalogue (hunger, weather,
   attacked) grows in `sampleDanger`.
-- Permission tiers (`observe`/`input_world`/`input_gui`) are deliberately
-  left for later (M1 implements localhost binding + token handshake, M2-A
-  the input rate limiter/master switch/per-input audit, M2-B the push
-  channel with strict opt-in).
+- Security model so far: M1 loopback binding + token handshake, M2-A the
+  input rate limiter/master switch/per-input audit, M2-B the strictly
+  opt-in push channel, M2-D the permission tiers (`observe` is the
+  read-only mode). A future token-scoped tier could reuse
+  `PermissionContracts` per connection instead of per config.
