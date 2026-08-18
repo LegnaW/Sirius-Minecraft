@@ -98,3 +98,10 @@
   - 修复 1：`GuiContracts.typeName(Class)`——simple name 为空时沿超类链取第一个具名类（匿名 EditBox → "EditBox"）
   - 修复 2（顺带加固，简报要求的清单核查）：`Screen` 有两个 widget 登记处——`children()`（addWidget/addRenderableWidget）与 **public 字段 `renderables`**（:77，`addRenderableOnly` 渲染-only 控件的唯一归宿，永远不进 children）。遍历改为两者并走 + 身份去重（renderables 是 public，无需反射）；`narratables` 是两者子集，无需单独走。同时 `seen` 集合防环（病态 mod 层级）。Javadoc/README 注明：**手动渲染的裸字段控件（如容器屏标题文字，render() 里直接 Font 画）不在任何清单里，结构性不可达**——已知限制
 - 复测要点：① E 开背包 → roles {result:1, crafting:4, hotbar:9, player:32}、46 槽、`container_slot` 热区 0-8/主 9-35/盔甲 36-39/副手 40；② T + input.text → widgets 含 `type:"EditBox"` 且 `text` 为输入内容；③ InventoryScreen widgets=1（配方书按钮，ImageButton）属预期非缺陷；④ 冒烟新增 roleOf 边界回归（盔甲 36-39 即便菜单位 5-8 也判 player）与 typeName 匿名类回退
+
+## 真机验证结果（2026-08-19，主管执行，回修后复验）
+
+- 首验 3/4：坐标往返/无屏/背包结构过；角色分界（hotbar=4/player=37）与 EditBox 遍历失败 → 打回
+- 回修根因：`addSlot` 覆写 `Slot.index` 为菜单位（真索引在 `getContainerSlot()`）；ChatScreen 输入框为匿名子类（`getSimpleName()` 空串，改走具名超类 + children()/renderables 双注册表遍历）
+- **复验 PASS（全过）**：roles `{result:1, crafting:4, player:32, hotbar:9}`；hotbar 首格 gui(133,179)→window(266,358)→mouseMove 回读零偏差；ChatScreen EditBox text='m2c editbox probe'；InventoryScreen widgets=1（配方书钮，符合预期）
+- 脚本 `m2c_verify.py`（可重复）；无屏/截断/fallback 未触发属预期路径
