@@ -1,6 +1,6 @@
 # sirius-bridge
 
-NeoForge mod running on the **real Minecraft client**, acting as the "eyes and hands" of the Sirius AI brain: screenshot capture, input injection, and event push. See `../sirius-technical.md` §8.2 for the full spec.
+NeoForge mod running on the **real Minecraft client**, acting as the "eyes and hands" of the Sirius AI brain: screenshot capture, input injection, and event push. See `../docs_agent/sirius-technical.md` §8.2 for the full spec.
 
 > Current status: **M1-C perception tools implemented** - `screenshot`, `getStats`
 > and `world.query` answer real requests from the live client (M1-B server +

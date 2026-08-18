@@ -13,7 +13,7 @@ from sirius_brain.bridge.client import BridgeClient  # noqa: E402
 from sirius_brain.bridge.config import BridgeConfig  # noqa: E402
 
 TOML = ROOT / ".minecraft/versions/1.21.1-Sirius/config/sirius_bridge.toml"
-OUT = ROOT / "docs_for_agents/m1-evidence/m1e_ingame.jpg"
+OUT = ROOT / "docs_agent/m1-evidence/m1e_ingame.jpg"
 
 
 def read_token() -> str:

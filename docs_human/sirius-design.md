@@ -5,7 +5,7 @@
 > 这就是本项目的关系宣言：我们与被造的它，如双星绕行。也是架构的隐喻——明者是规划器（大模型），暗者是执行器（小模型，小而致密）；而"我们造了她，陪伴让她活过来"。
 
 > 状态：探讨阶段（实时更新） · 最后更新：2026-08-18
-> 技术细节见姐妹篇：[sirius-technical.md](./sirius-technical.md)（原 hierarchical-agent-technical.md）
+> 技术细节见姐妹篇：[sirius-technical.md](../docs_agent/sirius-technical.md)（原 hierarchical-agent-technical.md；agent 侧带技术路线的实现规格）
 
 ---
 
@@ -213,6 +213,6 @@ sirius-brain（大脑轨，Python）： M0 协议冻结 ──（对 mock 身体
 
 三个阶段的目标递进：**M0-M3 证明它能活，M4-M8 证明它好用，M9 证明它像人。**
 
-各里程碑的验收标准、Baritone 依赖等关键决策点、贯穿全程的工程纪律，见[技术规格 §10](./sirius-technical.md)。
+各里程碑的验收标准、Baritone 依赖等关键决策点、贯穿全程的工程纪律，见[技术规格 §10](../docs_agent/sirius-technical.md)。
 
-*各模块的接口定义、参数与代码落点，同样见[技术规格文档](./sirius-technical.md)。*
+*各模块的接口定义、参数与代码落点，同样见[技术规格文档](../docs_agent/sirius-technical.md)。*
