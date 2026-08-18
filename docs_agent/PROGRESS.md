@@ -4,7 +4,7 @@
 > 设计内容不写这里（在 [sirius-design.md](../docs_human/sirius-design.md) / [sirius-technical.md](./sirius-technical.md)），这里只记"做到哪了、接下来干什么"。
 > 最后更新：2026-08-19
 
-## 当前阶段：M2（手）进行中——M2-A/A2 完成并真机验证通过（注入保真度风险解除）；M2-B（事件系统+getGuiState）待派发，M2-C（合成演示）待做
+## 当前阶段：M2（手）**全部完成**——含里程碑收官验收（纯脚本合成工作台）与权限分档实测；待启动 M3（会师）
 
 ## 已完成
 
@@ -39,7 +39,16 @@
 
 ## 进行中
 
-（无——M1 收口，等待 M2 启动确认；可选：进世界补一轮 in-game 感知验证）
+（无——M2 收口；下一步 M3：大脑最简版（单模型 截图→VLM→工具）+ NEKO 协议兼容层，见技术规格 §10.1）
+
+## M2 完成记录（2026-08-19，D 盘机收口）
+
+- [x] **M2-B 事件订阅推送**：EventPusher 单一事件入口（chat/gui_open/gui_close + 危险态 death/fire/health_low/drown 状态沿+5s 冷却）；events.subscribe per-connection 订阅（原子 seq）；截图推流（~1Hz 采样/6s 节流最新帧待发+边界补发/质量×边长双阶梯 100KB 硬预算/环形 3）；诚实丢弃计数。冒烟 119→175；真机 PASS（10 帧 seq 单调/预算内）。借鉴 N.E.K.O 生产管线（service.py:1037-1307）
+- [x] **M2-C getGuiState**：widgets 递归树（512 截断/匿名类走具名超类/children+renderables 双注册表）+ 容器 slots（guiLeft+slot.x 公式 + Numen 式角色分类）；真机首验 2 缺陷（addSlot 覆写 Slot.index→改用 getContainerSlot；盔甲槽归 player 角色致收官首跑木板入头盔槽→armor/offhand 独立角色）回修后 PASS。冒烟 200
+- [x] **M2-D look/lookAt+权限+command()**：vanilla Entity.lookAt 原式（setYRot/setXRot+yRotO/xRotO 同步，服务器自动跟随）；权限四级 observe/input_world/input_gui/full（默认 full 向后兼容，-32012+审计）；BridgeClient.command()（T→text→ENTER+500ms 沉降）。冒烟 241/pytest 193
+- [x] **M2 里程碑收官验收 PASS**：`m2_final.py` 纯脚本零 LLM——/give→E→getGuiState 定位→坐标换算→拖拽合成→工作台入包；终态双通道确认（结构化断言 + qwen3.7-plus 高清识图独立定位）；证据 m2_final_1~4.jpg
+- [x] **权限分档实测 PASS**（observe：感知照常/行为 -32012/审计留痕；验后已回 full）
+- [x] **参考项目精读落地**（RULES §3 先找参考）：本机克隆 D:\AI\Project\references\（numen/N.E.K.O/mindcraft-ce）；技术规格 §8.3 已按 Numen 现行代码修正（竞价→序数分层）
 
 ## 接下来：M0 剩余任务
 

@@ -6,7 +6,7 @@
 
 ## 0. 一段话
 
-Sirius 是一个 Minecraft AI 陪玩项目：让 AI 拥有**一个真正的 Minecraft 客户端**当身体（不是协议模拟器，也不是服务端假人），后端 Python 大脑通过 WebSocket 指挥这具身体——看它看的画面、（M2 起）替它动鼠标键盘。目标是"陪你进任何服务器玩的 AI 队友"：它看得到你的皮肤和 mod boss 的特效，对服务器来说就是个普通玩家。大脑侧是分层架构（大模型规划器 + 小模型执行器 + 无 LLM 反射层），记忆/技能/人格系统让它越玩越熟练、越处越懂你。
+Sirius 是一个 Minecraft AI 陪玩项目：让 AI 拥有**一个真正的 Minecraft 客户端**当身体（不是协议模拟器，也不是服务端假人），后端 Python 大脑通过 WebSocket 指挥这具身体——看它看的画面、（M2 已实现）替它动鼠标键盘。目标是"陪你进任何服务器玩的 AI 队友"：它看得到你的皮肤和 mod boss 的特效，对服务器来说就是个普通玩家。大脑侧是分层架构（大模型规划器 + 小模型执行器 + 无 LLM 反射层），记忆/技能/人格系统让它越玩越熟练、越处越懂你。
 
 ## 1. 全景图
 
@@ -47,7 +47,7 @@ BridgeClient.call("getStats")
 BridgeClient.send_task("挖一组铁矿")
   → TaskFrame{type:"task", task:"挖一组铁矿", task_id:"T-42"}            frames.py:73
   → （不等待，立即返回 task_id）
-  → Mod 干活（M2 前是占位：立即回 interrupted）
+  → Mod 干活（M3 前是占位：立即回 interrupted）
   → TaskFinishedFrame{type:"task_finished", status:<五态>, task_id:"T-42", text}
   → 大脑 on_task_finished 回调（按 task_id 归属，乱序完成也不出错）        frames.py:81
 ```
@@ -90,7 +90,12 @@ Mod 侧事件源（着火/聊天/GUI 变化…）
 | `ToolContext.java` | 每次调用的上下文：主线程编排 + 线程安全回帧 |
 | `PerceptionTools.java` | M1-C 三工具的 MC 薄壳（渲染线程抓屏/主线程读状态） |
 | `ToolContracts.java` | 纯逻辑：参数校验/响应组装/世界扫描（不 import 任何 MC 类） |
-| `ImageOps.java` | 纯逻辑：裁剪/JPEG/预算降级阶梯（纯 JDK/AWT） |
+| `ImageOps.java` | 纯逻辑：裁剪/JPEG/预算降级阶梯（纯 JDK/AWT；M2-B 加 100KB 推流档） |
+| `InputTools.java` + `KeyCodes` + `TokenBucket` + `InputContracts` | M2-A 四输入原语：GLFW 事件层注入（反射直达私有回调）、限频、GUI 点击留证 |
+| `InputGuard.java` | 输入总闸：开关/令牌桶/权限四级（M2-D） |
+| `EventPusher.java` + `EventsContracts.java` | M2-B 事件推送：单一事件入口 + 截图流（节流/预算/环形缓冲） |
+| `GuiTools.java` + `GuiContracts.java` | M2-C getGuiState：widget 树 + 容器格子角色分类 |
+| `LookTools.java` + `LookContracts` + `PermissionContracts` | M2-D 视角控制（vanilla lookAt 原式）+ 权限判定 |
 | `Json.java` | 帧构造 + JSON-RPC 风格错误码 |
 
 ## 4. 细节设计（思路 + 真实代码）
@@ -125,7 +130,7 @@ class TaskFinishedFrame(BaseModel):
 **思路**：Bridge Mod 本质是"合法远控"，安全必须内建而非后补。四道闸：仅绑定 loopback（`127.0.0.1`，网络上不可达）；token 握手（首帧强制 hello，错 token / 先发别的帧 / 10 秒沉默 → close 1008）；token 常数时间比较（防时序侧信道）；全事件审计日志。
 
 ```java
-// sirius-bridge/src/main/java/io/sirius/bridge/BridgeServer.java:256-261
+// sirius-bridge/src/main/java/io/sirius/bridge/BridgeServer.java:324-329
     /** Constant-time token comparison. */
     private boolean tokenMatches(String candidate) {
         return MessageDigest.isEqual(
@@ -137,10 +142,14 @@ class TaskFinishedFrame(BaseModel):
 认证转移与看门狗的竞态用 per-connection 同步消除——认证恰好只发生一次，晚到的看门狗被取消：
 
 ```java
-// sirius-bridge/src/main/java/io/sirius/bridge/BridgeServer.java:69-86
-    private static final class ClientSession {
+// sirius-bridge/src/main/java/io/sirius/bridge/BridgeServer.java:74-99（M2-B 加了订阅与 seq）
+    static final class ClientSession {
         volatile boolean authenticated;
         volatile ScheduledFuture<?> helloDeadline;
+        /** Event subscription; null = unsubscribed (default: no pushes at all). */
+        volatile EventsContracts.Subscription subscription;
+        /** Per-connection notification counter; first delivered frame gets 0. */
+        private final AtomicLong eventSeq = new AtomicLong();
 
         /** Auth transition is guarded so the watchdog cannot race the hello. */
         synchronized boolean authenticate() {
@@ -155,7 +164,11 @@ class TaskFinishedFrame(BaseModel):
             }
             return true;
         }
-    }
+
+        /** Sets/changes the event subscription (volatile write, any thread). */
+        void setSubscription(EventsContracts.Subscription subscription) {
+            this.subscription = subscription;
+        }
 ```
 
 ### 4.3 线程模型：WS 线程与游戏主线程的楚河汉界
@@ -173,8 +186,8 @@ class TaskFinishedFrame(BaseModel):
 工具需要同步拿到主线程结果时，用 latch 等待——**必须带超时**：窗口最小化时渲染循环停止排空任务队列，任务会活活饿死，无限等待等于挂死连接：
 
 ```java
-// sirius-bridge/src/main/java/io/sirius/bridge/PerceptionTools.java:254-268（省略失败重抛尾部）
-    private static <T> T callOnMainThread(ToolContext ctx, Supplier<T> supplier) throws Exception {
+// sirius-bridge/src/main/java/io/sirius/bridge/PerceptionTools.java:259-273（省略失败重抛尾部；M2-C 起包私有共享）
+    static <T> T callOnMainThread(ToolContext ctx, Supplier<T> supplier) throws Exception {
         CountDownLatch done = new CountDownLatch(1);
         Object[] box = new Object[2]; // [0] result, [1] failure
         ctx.onMainThread(() -> {
@@ -198,8 +211,8 @@ class TaskFinishedFrame(BaseModel):
 **思路**：1.21.1 把世界、手、HUD/打开的 GUI 全画进主渲染目标，所以对主 framebuffer 截图就是"玩家屏上所见"，标题屏也有效。渲染线程只做像素下载（~10-30ms），裁剪/JPEG/base64 全放 WS 线程——渲染线程零阻塞。
 
 ```java
-// sirius-bridge/src/main/java/io/sirius/bridge/PerceptionTools.java:109-117
-    private static BufferedImage grabScreen() {
+// sirius-bridge/src/main/java/io/sirius/bridge/PerceptionTools.java:110-118（M2-A 起包私有：留证复用）
+    static BufferedImage grabScreen() {
         RenderTarget target = Minecraft.getInstance().getMainRenderTarget();
         NativeImage shot = Screenshot.takeScreenshot(target); // world + hand + GUI, as on screen
         try {
@@ -215,7 +228,7 @@ class TaskFinishedFrame(BaseModel):
 编码侧是**预算阶梯**：base64 超 2MB 就质量 -10 一路降到 40，还超就缩到长边 1024px 再走一遍；病态图超预算也照发不失败（安全阀）：
 
 ```java
-// sirius-bridge/src/main/java/io/sirius/bridge/ImageOps.java:126-142
+// sirius-bridge/src/main/java/io/sirius/bridge/ImageOps.java:140-156
     public static Encoded encodeWithinBudget(BufferedImage image, int quality) throws IOException {
         BufferedImage current = image;
         boolean scaled = false;
@@ -223,7 +236,7 @@ class TaskFinishedFrame(BaseModel):
         for (int attempt = 0; attempt < 2; attempt++) {
             for (int q : qualityLadder(quality)) {
                 byte[] jpeg = encodeJpeg(current, q);
-                last = new Encoded(jpeg, q, scaled);
+                last = new Encoded(jpeg, q, scaled, current.getWidth(), current.getHeight());
                 if (base64Length(jpeg) <= MAX_BASE64_LENGTH) {
                     return last;
                 }
@@ -242,12 +255,13 @@ class TaskFinishedFrame(BaseModel):
 **思路**：`ToolContracts`/`ImageOps` 不 import 任何 Minecraft 类（参数校验/响应组装/扫描逻辑/图像处理全在纯 JDK 层），`PerceptionTools` 只留碰 MC API 的薄壳。因此 45 项冒烟检查不起游戏就能跑（`gradlew smokeTest`，挂进 build）。加新工具 = 注册一个 handler，分发器零改动：
 
 ```java
-// sirius-bridge/src/main/java/io/sirius/bridge/BridgeServer.java:93-97
-        // Built-in tool implementations. M1-C adds screenshot/getStats/world.query
-        // (and later input.*) by registering handlers here - dispatcher untouched.
+// sirius-bridge/src/main/java/io/sirius/bridge/BridgeServer.java:116-125（M2 全家注册，分发器不动）
+        // Built-in tool implementations. M1-C adds screenshot/getStats/world.query,
+        // M2-A the input.* primitives, M2-C getGuiState and M2-B events.subscribe
+        // by registering handlers here - dispatcher untouched. M2-D adds look/
+        // lookAt, sharing the InputGuard (master switch + rate limit + permission
+        // tier) with the input.* tools.
         tools.register("capabilities/list", (ctx, params) ->
-                Json.capabilitiesResponse(ctx.id(), Capabilities.list(), Capabilities.PROTOCOL_VERSION));
-        PerceptionTools.registerAll(tools);
 ```
 
 能力清单同样"零手写"：`Capabilities.list()` 运行时从 jar 内 schema 资源组装（构建期由 gradle `syncToolSchemas` 从 `../sirius-brain/schema` 单向同步）。
@@ -303,10 +317,43 @@ class TaskFinishedFrame(BaseModel):
 
 task_id 不参与匹配，回帧一律原样带回——和真 Mod 同一条铁律（`script.py:24-34` ScriptedTask docstring 明示）。
 
-## 5. 已知边界与下一步
+## 4.8 M2 的手：事件层注入、事件通道与 GUI 感知（速览）
 
-**当前边界（M1 完成态）**：输入注入（手）未实现——`task` 帧在 Mod 侧是占位（立即回 interrupted）；事件推送通道未实现；权限分级（observe/input_world/input_gui）与输入限频留给 M2；world.query 的 range 64 开阔空域要一次性摸 ~210 万方块位（主线程数百 ms）；客户端侧生物血量常未同步（best-effort）。
+三个关键设计事实，细节见 `docs_agent/reports/M2-{A,B,C,D}.md`：
 
-**M2（手）**：input.* 四原语（mouseMove/click/key/text）+ look/lookAt/getGuiState + 事件订阅推送 + 权限分级/限频。验收 = 纯脚本重放"按 E 开背包→拖木头→合成工作台"——整个项目可行性的证明点。
+1. **输入走 1.21.1 真实的 GLFW 回调入口**（`KeyboardHandler.keyPress` public 直调、`onPress/onMove/charTyped` 反射直达）——不是绕过事件系统的"动作直调"，Mod GUI、按键映射、反作弊视角下与真人按键同管线同行为（真机验收：像素差 95.4% 确认背包开合）。
+2. **事件推送是单一入口的推送通道**：`EventPusher.push()` 过滤订阅（类型+级别）、每连接原子 seq、诚实丢弃计数；截图推流按 N.E.K.O 生产参数（6s 节流最新帧待发、质量×边长双阶梯压 100KB 硬预算）。
+3. **GUI 感知的角色分类踩过两次真坑，都已修**：`AbstractContainerMenu.addSlot` 会把 `Slot.index` 覆写成菜单位（真索引在 `getContainerSlot()`）；盔甲槽的容器就是玩家背包，不独立分角色会让"找空背包格"命中头盔位——收官首跑的木板就这么进的头盔：
+
+```java
+// sirius-bridge/src/main/java/io/sirius/bridge/GuiContracts.java:190-215（节选）
+    public static String roleOf(boolean craftingContainer, boolean resultSlot,
+                                boolean playerInventory, int containerSlot) {
+        if (craftingContainer) {
+            return ROLE_CRAFTING;
+        }
+        if (resultSlot) {
+            return ROLE_RESULT;
+        }
+        if (playerInventory) {
+            if (containerSlot < 9) {
+                return ROLE_HOTBAR;
+            }
+            // Armor/offhand must not masquerade as storage: the first real-machine
+            // acceptance run dragged crafted planks onto an "empty player slot"
+            // that was actually the helmet slot (armor lives in the player
+            // Inventory at container indices 36-39, offhand at 40). Distinct
+            // roles let script and brain filters exclude them naturally.
+            if (containerSlot >= 36 && containerSlot <= 39) {
+                return ROLE_ARMOR;
+            }
+            ...
+```
 
 **M3（会师）**：大脑最简版（单模型：截图→VLM→工具）驱动真身体 + NEKO 协议兼容层。之后 M4-M9：反射/寻路 → 分层大脑 → 记忆 → 知识库 → 技能沉淀 → 陪伴感。完整路线图见 `docs_agent/sirius-technical.md` §10。
+
+## 5. 已知边界与下一步
+
+**当前边界（M2 完成态）**：眼睛（screenshot/getStats/world.query/getGuiState）与手（input.* 四原语、look/lookAt、事件推送、权限四级、限频、审计）全部就绪，里程碑收官验收已过——纯脚本零 LLM 完成"按 E 开背包→拖木头→合成工作台"。仍未做：NEKO `task` 帧在 Mod 侧还是占位（立即回 interrupted，M3 兼容层实现）；events.watch（stat 条件触发）留 M3；input_gui/input_world 两档未重启实测（纯逻辑侧冒烟覆盖）；视角转动走动作层（mouse 路径仍需窗口前台）；world.query 的 range 64 开阔空域一次性摸 ~210 万方块位；客户端侧生物血量常未同步（best-effort）。
+
+**M3（会师）⭐**：大脑最简版——单模型"截图→VLM→工具"循环驱动真身体 + NEKO 协议兼容层（让 N.E.K.O 人格大脑也能驱动同一身体）。这是"大脑不绑死身体"的第二次实战，也是两条开发轨的会师点。

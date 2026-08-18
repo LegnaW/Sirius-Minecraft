@@ -85,3 +85,8 @@
 - **终态双通道确认**：getGuiState 断言 crafting_table@player idx=9 count=1；qwen3.7-plus 高分辨率识图独立确认"工作台在主背包区最左上第一格"（与本轮首次 854x480 下木板/原木混淆形成对照——分辨率建议成立）
 - 证据：m2_final_1~4 截图；中断根因记录：首跑木板被点入头盔槽（armor 槽容器=玩家 Inventory 被归 player 角色）→ role 细分修复
 - **意义：M2 验收标准"纯脚本重放按 E 开背包→拖木头→合成工作台"达成——项目可行性证明点（四原则之"风险前置"全链路闭环）**
+
+### 部分 3：权限分档实测（PASS，observe 档）
+- toml `permission = "observe"` 重启后：screenshot/getStats 照常（只读不禁）；input.key 与 look 均拒绝 **-32012**（消息明示 tier）；审计 `INPUT_DENIED reason=permission tier=observe` 两行留痕
+- 验后已改回 `permission = "full"`（下次启动恢复全功能）
+- input_gui/input_world 两档未做重启实测（矩阵的纯逻辑侧 241 冒烟覆盖；屏幕态判定路径与 observe 同一代码路径）——留待日常使用中自然覆盖
