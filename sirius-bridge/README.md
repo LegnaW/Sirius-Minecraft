@@ -593,14 +593,17 @@ contents and container-slot item ids, in one request.
 - **Role semantics** (generic detection, adopted from Numen GuiOps):
   `crafting` (slot container is a `CraftingContainer`), `result`
   (`ResultSlot`), `hotbar`/`player` (the player's own inventory - **container
-  slot** < 9 = hotbar; >= 9 = player, which also covers armor 36-39 and
-  offhand 40), `container` (anything else - chest/furnace/modded). The
+  slot** 0-8 = hotbar; 9-35 = player), `armor` (container slots 36-39),
+  `offhand` (40), `container` (anything else - chest/furnace/modded). The
   boundary uses `Slot.getContainerSlot()`, never `Slot.index` -
   `AbstractContainerMenu.addSlot` overwrites `index` with the menu position,
   which put the ARMOR slots (menu positions 5-8) in "hotbar" in the first
-  real-machine run. The vanilla E-key inventory therefore reports 1 result +
-  4 crafting + 9 hotbar + 32 player (27 main + 4 armor + offhand) =
-  **46 slots**.
+  real-machine run. Armor/offhand are separate roles because lumping them
+  into "player" made the first acceptance replay drag crafted planks onto
+  the helmet slot when filtering for "empty player slots" - storage filters
+  should use player/hotbar only. The vanilla E-key inventory therefore
+  reports 1 result + 4 crafting + 9 hotbar + 27 player + 4 armor + 1
+  offhand = **46 slots**.
 - **`in_game`** mirrors the getStats convention: a screen without a world
   (title/options screens) still reports its widgets, plus `in_game: false`
   for context.

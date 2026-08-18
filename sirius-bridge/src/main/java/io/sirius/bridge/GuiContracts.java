@@ -152,13 +152,16 @@ public final class GuiContracts {
     /**
      * Slot role strings (Numen GuiOps generic detection): "crafting" (container
      * is a CraftingContainer), "result" (ResultSlot), "hotbar" (player
-     * inventory, container index 0-8), "player" (player inventory, index >= 9),
-     * "container" (anything else - chest/furnace/modded containers).
+     * inventory, container index 0-8), "player" (player inventory, index 9-35),
+     * "armor" (36-39), "offhand" (40), "container" (anything else -
+     * chest/furnace/modded containers).
      */
     public static final String ROLE_CRAFTING = "crafting";
     public static final String ROLE_RESULT = "result";
     public static final String ROLE_HOTBAR = "hotbar";
     public static final String ROLE_PLAYER = "player";
+    public static final String ROLE_ARMOR = "armor";
+    public static final String ROLE_OFFHAND = "offhand";
     public static final String ROLE_CONTAINER = "container";
 
     /**
@@ -193,7 +196,21 @@ public final class GuiContracts {
             return ROLE_RESULT;
         }
         if (playerInventory) {
-            return containerSlot < 9 ? ROLE_HOTBAR : ROLE_PLAYER;
+            if (containerSlot < 9) {
+                return ROLE_HOTBAR;
+            }
+            // Armor/offhand must not masquerade as storage: the first real-machine
+            // acceptance run dragged crafted planks onto an "empty player slot"
+            // that was actually the helmet slot (armor lives in the player
+            // Inventory at container indices 36-39, offhand at 40). Distinct
+            // roles let script and brain filters exclude them naturally.
+            if (containerSlot >= 36 && containerSlot <= 39) {
+                return ROLE_ARMOR;
+            }
+            if (containerSlot == 40) {
+                return ROLE_OFFHAND;
+            }
+            return ROLE_PLAYER;
         }
         return ROLE_CONTAINER;
     }

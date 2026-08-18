@@ -882,12 +882,14 @@ public final class SmokeMain {
 
         // --- role strings (the generic classification vocabulary)
         java.util.Set<String> roles = java.util.Set.of(GuiContracts.ROLE_CRAFTING, GuiContracts.ROLE_RESULT,
-                GuiContracts.ROLE_HOTBAR, GuiContracts.ROLE_PLAYER, GuiContracts.ROLE_CONTAINER);
-        check(roles.size() == 5, "gui: five distinct role strings");
+                GuiContracts.ROLE_HOTBAR, GuiContracts.ROLE_PLAYER, GuiContracts.ROLE_ARMOR,
+                GuiContracts.ROLE_OFFHAND, GuiContracts.ROLE_CONTAINER);
+        check(roles.size() == 7, "gui: seven distinct role strings");
         check("crafting".equals(GuiContracts.ROLE_CRAFTING) && "result".equals(GuiContracts.ROLE_RESULT)
                         && "hotbar".equals(GuiContracts.ROLE_HOTBAR) && "player".equals(GuiContracts.ROLE_PLAYER)
+                        && "armor".equals(GuiContracts.ROLE_ARMOR) && "offhand".equals(GuiContracts.ROLE_OFFHAND)
                         && "container".equals(GuiContracts.ROLE_CONTAINER),
-                "gui: role string mapping (crafting/result/hotbar/player/container)");
+                "gui: role string mapping (crafting/result/hotbar/player/armor/offhand/container)");
 
         // --- roleOf: hotbar boundary uses the CONTAINER slot index, never the
         // menu position (Slot.index is clobbered by addSlot - real-machine bug:
@@ -898,10 +900,11 @@ public final class SmokeMain {
         check(GuiContracts.roleOf(false, false, true, 9) == GuiContracts.ROLE_PLAYER
                         && GuiContracts.roleOf(false, false, true, 35) == GuiContracts.ROLE_PLAYER,
                 "gui: roleOf container slots 9-35 are player");
-        check(GuiContracts.roleOf(false, false, true, 36) == GuiContracts.ROLE_PLAYER
-                        && GuiContracts.roleOf(false, false, true, 39) == GuiContracts.ROLE_PLAYER
-                        && GuiContracts.roleOf(false, false, true, 40) == GuiContracts.ROLE_PLAYER,
-                "gui: roleOf armor (36-39) and offhand (40) are player despite menu positions 5-8/45");
+        check(GuiContracts.roleOf(false, false, true, 36) == GuiContracts.ROLE_ARMOR
+                        && GuiContracts.roleOf(false, false, true, 39) == GuiContracts.ROLE_ARMOR,
+                "gui: roleOf armor (36-39) is its own role - storage filters must exclude it");
+        check(GuiContracts.roleOf(false, false, true, 40) == GuiContracts.ROLE_OFFHAND,
+                "gui: roleOf offhand (40) is its own role despite menu position 45");
         check(GuiContracts.roleOf(true, true, true, 0) == GuiContracts.ROLE_CRAFTING
                         && GuiContracts.roleOf(false, true, false, 0) == GuiContracts.ROLE_RESULT,
                 "gui: roleOf crafting takes precedence, then result");
