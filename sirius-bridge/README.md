@@ -469,32 +469,45 @@ contents and container-slot item ids, in one request.
               "visible": true, "active": true, "message": "Reset Demo"},
              {"type": "EditBox", "x": 5, "y": 6, "width": 100, "height": 16,
               "visible": true, "active": true, "text": "hello"}],
- "slots": [{"index": 0, "x": 154, "y": 28, "role": "result",
+ "slots": [{"index": 0, "container_slot": 0, "x": 154, "y": 28, "role": "result",
             "item": "minecraft:oak_log", "count": 12},
-           {"index": 9, "x": 30, "y": 40, "role": "player", "item": null, "count": 0}],
+           {"index": 9, "container_slot": 9, "x": 30, "y": 40, "role": "player",
+            "item": null, "count": 0}],
  "truncated": false}
 ```
 
-- `widgets` comes from a recursive walk of the screen's `children()` tree
-  (depth-bounded at 12, capped at **512** nodes - beyond that `truncated:true`
-  and enumeration stops, the world.query discipline). Each node carries the
-  class simple name as `type`, geometry, `visible`/`active` flags, `message`
-  (`getMessage().getString()` - **omitted when empty**) and `text` for text
-  fields (`EditBox.getValue()` - omitted for other widgets).
+- `widgets` comes from a walk of BOTH widget registries a Screen keeps: the
+  `children()` tree (addWidget / addRenderableWidget) and the public
+  `renderables` list (the only home of `addRenderableOnly` widgets such as
+  render-only labels) - identity-deduplicated, depth-bounded at 12, capped
+  at **512** nodes - beyond that `truncated:true` and enumeration stops, the
+  world.query discipline. Each node carries the class simple name as `type`
+  (anonymous subclasses - vanilla's ChatScreen input is one - fall back to
+  the first named superclass, so it reports `EditBox`), geometry,
+  `visible`/`active` flags, `message` (`getMessage().getString()` -
+  **omitted when empty**) and `text` for text fields (`EditBox.getValue()` -
+  omitted for other widgets). Note the vanilla `InventoryScreen` really has
+  only ~1 widget (the recipe-book toggle) - its structure lives in `slots`.
 - `slots` is present only for container screens
   (`AbstractContainerScreen`): every `menu.slots` entry with screen position
   `getGuiLeft()+slot.x / getGuiTop()+slot.y` (slots are 16x16 cells rendered
-  outside the children() widget tree). `item` is the registry name string or
-  JSON `null` (empty slot / access failure), `count` 0 when empty. There is
+  outside the children() widget tree). `index` is the menu list position
+  (`Slot.index`), `container_slot` the slot's index inside its container
+  (`Slot.getContainerSlot()`). `item` is the registry name string or JSON
+  `null` (empty slot / access failure), `count` 0 when empty. There is
   deliberately no slot cap - vanilla containers stay under ~50 slots and
   slots are flat, not recursive.
 - **Role semantics** (generic detection, adopted from Numen GuiOps):
   `crafting` (slot container is a `CraftingContainer`), `result`
-  (`ResultSlot`), `hotbar`/`player` (the player's own inventory - container
-  index < 9 = hotbar; >= 9 = player, which also covers armor 36-39 and
+  (`ResultSlot`), `hotbar`/`player` (the player's own inventory - **container
+  slot** < 9 = hotbar; >= 9 = player, which also covers armor 36-39 and
   offhand 40), `container` (anything else - chest/furnace/modded). The
-  vanilla E-key inventory therefore reports 1 result + 4 crafting + 9 hotbar
-  + 32 player (27 main + 4 armor + offhand) = **46 slots**.
+  boundary uses `Slot.getContainerSlot()`, never `Slot.index` -
+  `AbstractContainerMenu.addSlot` overwrites `index` with the menu position,
+  which put the ARMOR slots (menu positions 5-8) in "hotbar" in the first
+  real-machine run. The vanilla E-key inventory therefore reports 1 result +
+  4 crafting + 9 hotbar + 32 player (27 main + 4 armor + offhand) =
+  **46 slots**.
 - **`in_game`** mirrors the getStats convention: a screen without a world
   (title/options screens) still reports its widgets, plus `in_game: false`
   for context.
@@ -511,9 +524,12 @@ contents and container-slot item ids, in one request.
   `gx * screenWidth / guiScaledWidth`, then mouseMove + click. On the
   standard test client the scale is a small integer (GUI scale 2-4).
 - Known limits: modded screens with fully custom rendering may yield few or
-  zero widgets (they draw directly); slots are reliable for vanilla-style
-  containers; `message` only carries plain text (no styling metadata); the
-  response is a snapshot - the screen may change between call and click.
+  zero widgets (they draw directly); widgets that are plain fields rendered
+  manually - e.g. container-screen title labels drawn with `Font` in
+  `render()` - live in neither `children()` nor `renderables` and are
+  unreachable; slots are reliable for vanilla-style containers; `message`
+  only carries plain text (no styling metadata); the response is a snapshot -
+  the screen may change between call and click.
 
 ## Build
 
@@ -534,10 +550,10 @@ entity filtering, the key-name table, the rate-limiter token bucket,
 evidence file naming, the config parser (incl. `keep_running_unfocused`
 defaults/round-trips), subscription matching, notification frame assembly,
 the stream throttle state machine (injected clock), the streaming ladder,
-plus widget/slot node assembly, the 512-node cap and all three getGuiState
-response shapes - with no game launched (193 checks; a 4K
-incompressible-noise image verifies the 2MB RPC degrade, an 800x600 one the
-100KB stream ladder).
+plus widget/slot node assembly, the 512-node cap, slot role classification
+and all three getGuiState response shapes - with no game launched (200
+checks; a 4K incompressible-noise image verifies the 2MB RPC degrade, an
+800x600 one the 100KB stream ladder).
 
 ## Deploy to test client
 

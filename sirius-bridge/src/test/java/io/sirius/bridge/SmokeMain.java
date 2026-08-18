@@ -809,19 +809,20 @@ public final class SmokeMain {
         // --- container response shape + slot JSON (item null vs name, note)
         GuiContracts.WidgetCollector empty = new GuiContracts.WidgetCollector();
         List<GuiContracts.SlotFact> slots = List.of(
-                new GuiContracts.SlotFact(0, 100, 20, GuiContracts.ROLE_RESULT, "minecraft:oak_log", 12, null),
-                new GuiContracts.SlotFact(9, 30, 40, GuiContracts.ROLE_PLAYER, null, 0, null),
-                new GuiContracts.SlotFact(40, 77, 62, GuiContracts.ROLE_CONTAINER, null, 0,
+                new GuiContracts.SlotFact(0, 0, 100, 20, GuiContracts.ROLE_RESULT, "minecraft:oak_log", 12, null),
+                new GuiContracts.SlotFact(9, 9, 30, 40, GuiContracts.ROLE_PLAYER, null, 0, null),
+                new GuiContracts.SlotFact(40, 40, 77, 62, GuiContracts.ROLE_CONTAINER, null, 0,
                         "item access failed: boom"));
         JsonObject container = GuiContracts.guiStateResult(true, "InventoryScreen", empty, slots);
         check(container.has("slots") && container.get("widgets").getAsJsonArray().size() == 0,
                 "gui: container result carries slots and can have zero widgets");
         JsonObject slot0 = container.get("slots").getAsJsonArray().get(0).getAsJsonObject();
-        check(slot0.get("index").getAsInt() == 0 && slot0.get("x").getAsInt() == 100
+        check(slot0.get("index").getAsInt() == 0 && slot0.get("container_slot").getAsInt() == 0
+                        && slot0.get("x").getAsInt() == 100
                         && slot0.get("y").getAsInt() == 20
                         && "minecraft:oak_log".equals(slot0.get("item").getAsString())
                         && slot0.get("count").getAsInt() == 12 && !slot0.has("note"),
-                "gui: slot entry fields (index/x/y/role/item/count), note omitted when fine");
+                "gui: slot entry fields (index/container_slot/x/y/role/item/count), note omitted when fine");
         JsonObject slot1 = container.get("slots").getAsJsonArray().get(1).getAsJsonObject();
         check(slot1.get("item").isJsonNull() && slot1.get("count").getAsInt() == 0,
                 "gui: empty slot reports item:null count:0");
@@ -861,6 +862,37 @@ public final class SmokeMain {
                         && "hotbar".equals(GuiContracts.ROLE_HOTBAR) && "player".equals(GuiContracts.ROLE_PLAYER)
                         && "container".equals(GuiContracts.ROLE_CONTAINER),
                 "gui: role string mapping (crafting/result/hotbar/player/container)");
+
+        // --- roleOf: hotbar boundary uses the CONTAINER slot index, never the
+        // menu position (Slot.index is clobbered by addSlot - real-machine bug:
+        // armor at menu positions 5-8 was classified hotbar)
+        check(GuiContracts.roleOf(false, false, true, 0) == GuiContracts.ROLE_HOTBAR
+                        && GuiContracts.roleOf(false, false, true, 8) == GuiContracts.ROLE_HOTBAR,
+                "gui: roleOf container slots 0-8 are hotbar");
+        check(GuiContracts.roleOf(false, false, true, 9) == GuiContracts.ROLE_PLAYER
+                        && GuiContracts.roleOf(false, false, true, 35) == GuiContracts.ROLE_PLAYER,
+                "gui: roleOf container slots 9-35 are player");
+        check(GuiContracts.roleOf(false, false, true, 36) == GuiContracts.ROLE_PLAYER
+                        && GuiContracts.roleOf(false, false, true, 39) == GuiContracts.ROLE_PLAYER
+                        && GuiContracts.roleOf(false, false, true, 40) == GuiContracts.ROLE_PLAYER,
+                "gui: roleOf armor (36-39) and offhand (40) are player despite menu positions 5-8/45");
+        check(GuiContracts.roleOf(true, true, true, 0) == GuiContracts.ROLE_CRAFTING
+                        && GuiContracts.roleOf(false, true, false, 0) == GuiContracts.ROLE_RESULT,
+                "gui: roleOf crafting takes precedence, then result");
+        check(GuiContracts.roleOf(false, false, false, 3) == GuiContracts.ROLE_CONTAINER,
+                "gui: roleOf non-player containers fall back to container");
+
+        // --- typeName: anonymous subclasses report the first named superclass
+        // (ChatScreen's EditBox is an anonymous override - getSimpleName() is "")
+        check("String".equals(GuiContracts.typeName(String.class)),
+                "gui: typeName returns the simple name for named classes");
+        check("FakeWidget".equals(GuiContracts.typeName(new FakeWidget() {}.getClass()))
+                        && "FakeWidget".equals(GuiContracts.typeName(FakeWidget.class)),
+                "gui: typeName falls back to the named superclass for anonymous widgets");
+    }
+
+    /** Named stand-in for an AbstractWidget subclass (typeName smoke checks). */
+    private static class FakeWidget {
     }
 
     // ------------------------------------------------------------------ helpers

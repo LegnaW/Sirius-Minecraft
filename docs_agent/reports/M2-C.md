@@ -1,9 +1,9 @@
 # M2-C 工作报告
 
 - 任务：sirius-bridge GUI 状态工具 `getGuiState()`——打开界面的结构化快照（widget 树 + 容器槽位 + 物品注册名），纯逻辑/薄壳分离，降级兜底
-- 日期：2026-08-18
-- 状态：完成（代码全部落地、build + smokeTest 193/193 全绿；真机行为待主管验收，清单见下）
-- 验收：`gradlew build` BUILD SUCCESSFUL；smokeTest **193/193**（既有 175 项一行未动 + 新增 18 项）；协议/schema 零改动（getGuiState 本就在 12 个冻结能力里，Python 侧通用 `call()` 直接可用）；未部署、未提交
+- 日期：2026-08-18（同日首轮真机验收回修，见末节）
+- 状态：完成 + 回修（首轮真机 2 缺陷已修复，代码全部落地、build + smokeTest 200/200 全绿；复测清单见末节）
+- 验收：`gradlew build` BUILD SUCCESSFUL；smokeTest **200/200**（既有 175 项一行未动 + M2-C 25 项，其中 1 项随 container_slot 字段更新、7 项为回修新增回归）；协议/schema 零改动（getGuiState 本就在 12 个冻结能力里，Python 侧通用 `call()` 直接可用）；未部署、未提交
 
 ## 交付物
 
@@ -11,8 +11,8 @@
 - `sirius-bridge/src/main/java/io/sirius/bridge/GuiTools.java`（新增，MC 薄壳 195 行）：注册 `getGuiState`；主线程（复用 PerceptionTools latch，10s 超时）一次性完成读取 + JSON 组装；widget 递归遍历（children() 树，深度上限 12、节点上限 512，AbstractWidget 出节点、ContainerEventHandler 递归、两者可兼得如滚动列表）；容器路径（`menu.slots` → `getGuiLeft()+slot.x / getGuiTop()+slot.y`，逐槽 try/catch，坏槽降级 item:null+note 不杀整个响应）；遍历抛异常 → fallback 响应（绝不向 dispatcher 抛 → 不出 -32603）；role 判定（CraftingContainer→crafting、ResultSlot→result、玩家 Inventory→index<9 hotbar 否则 player、其余 container）
 - `BridgeServer.java`（+2 行）：构造器 `GuiTools.registerAll(tools);` + 注释更新
 - `PerceptionTools.java`（1 词）：`callOnMainThread` 从 private 改包私有（GuiTools 复用；行为零变化，javadoc 注明 M2-A 的本地副本保留）
-- `SmokeMain.java`（+127 行）：+18 项冒烟，总 **193/193**
-- `sirius-bridge/README.md`：新增 "The GUI state tool (M2-C)" 章节（响应形状、坐标基准=gui-scaled 与 mouseMove 返回同基、role 语义、46 槽分解、cap/truncation、fallback、已知限制）；frames 表加行；冒烟计数 175→193；项目布局/状态注记/下一步更新
+- `SmokeMain.java`（+160 行）：+25 项冒烟（18 初版 + 7 回修回归），总 **200/200**
+- `sirius-bridge/README.md`：新增 "The GUI state tool (M2-C)" 章节（响应形状、坐标基准=gui-scaled 与 mouseMove 返回同基、role 语义、46 槽分解、cap/truncation、fallback、已知限制）；frames 表加行；冒烟计数 175→200；项目布局/状态注记/下一步更新
 
 ## 关键决策与理由
 
@@ -48,9 +48,9 @@
 
 ## 验证方式
 
-- `gradlew build`（含 check→smokeTest）BUILD SUCCESSFUL，**193/193**：
-  - 新增 18 项分布：参数校验 2（空对象通过/带键拒绝）、collector 2（上限内收/512 停 + truncated）、widget 节点 3（字段齐全/空 message 省略 + EditBox text/null message+text 省略且不可见仍上报）、标准形状 1（非容器屏无 slots 字段）、容器形状 + 槽 5（slots 字段/槽字段齐全 note 省略/空槽 null+0/坏槽 item:null+note）、无屏形状 1（恰一字段）、fallback 4（标志+类名+note/rects 只留几何/空 partial 空 rects）、role 2（五角色互异/字符串映射）
-  - 既有 175 项一行未改、全绿
+- `gradlew build`（含 check→smokeTest）BUILD SUCCESSFUL，**200/200**：
+  - 新增 25 项分布：参数校验 2（空对象通过/带键拒绝）、collector 2（上限内收/512 停 + truncated）、widget 节点 3（字段齐全/空 message 省略 + EditBox text/null message+text 省略且不可见仍上报）、标准形状 1（非容器屏无 slots 字段）、容器形状 + 槽 5（slots 字段/槽字段含 container_slot 且 note 省略/空槽 null+0/坏槽 item:null+note）、无屏形状 1（恰一字段）、fallback 4（标志+类名+note/rects 只留几何/空 partial 空 rects）、role 字符串 2、**roleOf 边界 5**（容器槽 0-8=hotbar/9-35=player/盔甲 36-39 与副手 40 即便菜单位 5-8/45 也判 player/crafting 优先/result/非玩家容器兜底）、**typeName 2**（具名类 simple name/匿名子类回退具名超类）
+  - 既有 175 项一行未改、全绿（M2-C 首版 18 项中仅"槽字段"1 项随 container_slot 字段扩充断言，语义不变）
 - 全部 MC API 调用（children 通配符/字段 vs 方法/getMenu/getGuiLeft/Slot 字段/InventoryMenu 排布/ItemStack 判空）对照反编译源写出，无一处凭记忆
 - 真机行为按约束未自测（不启动客户端），风险面收敛进下述清单
 
@@ -86,3 +86,15 @@
   - 槽无独立上限：病态 mod 菜单（数百槽）会让响应变大——现实未见过，出现再加 cap
   - 最小化窗口 10s 超时 -32603（既有保护，非内容错误）
 - 关联报告：M1-C（latch 模式/grabScreen/纯逻辑-薄壳方法论）、M2-A（gui_scaled 坐标基/输入原语）、M2-B（gui_open/gui_close 事件）、sirius-technical.md §8.2（fallback 层级语义）
+
+## 真机验证回修（2026-08-18，首轮验收 2 缺陷）
+
+- 状态：已修复，build + smokeTest **200/200** 全绿（原 193 项中 1 项随响应形状更新、新增 7 项回归）；待主管复测下列 1-4
+- 缺陷 1——**role 边界错**：真机 InventoryScreen 报 `{result:1, crafting:4, hotbar:4, player:37}`（期望 hotbar=9 / player=32）
+  - 根因（反编译源核实）：`AbstractContainerMenu.addSlot`（:102-109）**会把 `Slot.index` 覆写成菜单槽表位置**（`slot.index = slots.size()`），构造期传入的容器索引只保存在私有 final `slot` 字段里。InventoryMenu 的盔甲槽容器索引 36-39，但菜单位置 5-8 → `index<9` 误判 hotbar；真 hotbar（容器索引 0-8）菜单位置 36-44 → 误判 player。首版用 `slot.index` 做边界正是踩了这个覆写
+  - 修复：改用 **`Slot.getContainerSlot()`**（:183，返回未被覆写的容器索引；`getSlotIndex()` :105 同源）判定——玩家 Inventory 容器索引 0-8=hotbar、9-35=主、36-39=盔甲、40=副手（后三者均 player）。判定逻辑从 GuiTools 下沉为纯函数 `GuiContracts.roleOf(crafting, result, playerInv, containerSlot)`（可冒烟），响应槽位新增 `container_slot` 字段（`index` 仍为菜单位置，两个字段各表其义）
+- 缺陷 2——**ChatScreen EditBox 未上报**：T + 输入后 getGuiState 报 `screen_class:"ChatScreen"` 但找不到 EditBox 节点（InventoryScreen widgets=1 属预期——原版容器屏只有配方书切换按钮 1 个 widget，结构都在 slots 里）
+  - 根因（反编译源核实）：ChatScreen 的输入框是**匿名子类**（`new EditBox(...) { createNarrationMessage... }`，ChatScreen.java:40），经 `addWidget`（:51）正常进 `children()`——首版遍历其实能走到它，但 `getClass().getSimpleName()` 对匿名类返回**空串**，节点 `type:""` 无法被识别为 EditBox
+  - 修复 1：`GuiContracts.typeName(Class)`——simple name 为空时沿超类链取第一个具名类（匿名 EditBox → "EditBox"）
+  - 修复 2（顺带加固，简报要求的清单核查）：`Screen` 有两个 widget 登记处——`children()`（addWidget/addRenderableWidget）与 **public 字段 `renderables`**（:77，`addRenderableOnly` 渲染-only 控件的唯一归宿，永远不进 children）。遍历改为两者并走 + 身份去重（renderables 是 public，无需反射）；`narratables` 是两者子集，无需单独走。同时 `seen` 集合防环（病态 mod 层级）。Javadoc/README 注明：**手动渲染的裸字段控件（如容器屏标题文字，render() 里直接 Font 画）不在任何清单里，结构性不可达**——已知限制
+- 复测要点：① E 开背包 → roles {result:1, crafting:4, hotbar:9, player:32}、46 槽、`container_slot` 热区 0-8/主 9-35/盔甲 36-39/副手 40；② T + input.text → widgets 含 `type:"EditBox"` 且 `text` 为输入内容；③ InventoryScreen widgets=1（配方书按钮，ImageButton）属预期非缺陷；④ 冒烟新增 roleOf 边界回归（盔甲 36-39 即便菜单位 5-8 也判 player）与 typeName 匿名类回退

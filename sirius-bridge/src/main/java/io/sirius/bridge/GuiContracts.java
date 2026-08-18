@@ -49,6 +49,23 @@ public final class GuiContracts {
 
     // ------------------------------------------------------------------ widget nodes
 
+    /**
+     * Widget type name for the JSON node: the class simple name, except that
+     * ANONYMOUS subclasses report {@code ""} from {@code getSimpleName()} -
+     * and vanilla uses them (ChatScreen's input is an anonymous EditBox
+     * override) - so we walk up to the first NAMED superclass ("EditBox").
+     */
+    public static String typeName(Class<?> type) {
+        for (Class<?> c = type; c != null; c = c.getSuperclass()) {
+            String name = c.getSimpleName();
+            if (!name.isEmpty()) {
+                return name;
+            }
+        }
+        return type.getName(); // defensive: only reachable for Object-anonymous
+    }
+
+
     /** Max widget nodes in one response (world.query discipline: stop + flag). */
     public static final int WIDGETS_CAP = 512;
 
@@ -145,11 +162,40 @@ public final class GuiContracts {
     public static final String ROLE_CONTAINER = "container";
 
     /**
-     * One container slot. {@code item} is the registry name ("minecraft:oak_log")
-     * or null (empty / access failed); {@code count} is 0 when empty;
-     * {@code note} explains a degraded entry (item access failure) or is null.
+     * One container slot. {@code index} is the position in the menu's slot
+     * list (what {@code Slot.index} holds after menu construction); {@code
+     * containerSlot} is the slot's index INSIDE its container
+     * ({@code Slot.getContainerSlot()}); {@code item} is the registry name
+     * ("minecraft:oak_log") or null (empty / access failed); {@code count} is
+     * 0 when empty; {@code note} explains a degraded entry (item access
+     * failure) or is null.
      */
-    public record SlotFact(int index, int x, int y, String role, String item, int count, String note) {
+    public record SlotFact(int index, int containerSlot, int x, int y,
+                           String role, String item, int count, String note) {
+    }
+
+    /**
+     * Generic role classification (Numen GuiOps method). The hotbar boundary
+     * MUST use the CONTAINER slot index ({@code Slot.getContainerSlot()}),
+     * not {@code Slot.index}: {@code AbstractContainerMenu.addSlot}
+     * overwrites {@code index} with the menu list position, which for the
+     * vanilla inventory puts the ARMOR slots (menu positions 5-8) under 9 and
+     * the actual hotbar (menu positions 36-44) over it - the M2-C real-machine
+     * role bug. Container indices of the player Inventory: 0-8 hotbar,
+     * 9-35 main, 36-39 armor, 40 offhand.
+     */
+    public static String roleOf(boolean craftingContainer, boolean resultSlot,
+                                boolean playerInventory, int containerSlot) {
+        if (craftingContainer) {
+            return ROLE_CRAFTING;
+        }
+        if (resultSlot) {
+            return ROLE_RESULT;
+        }
+        if (playerInventory) {
+            return containerSlot < 9 ? ROLE_HOTBAR : ROLE_PLAYER;
+        }
+        return ROLE_CONTAINER;
     }
 
     /**
@@ -162,6 +208,7 @@ public final class GuiContracts {
         for (SlotFact slot : slots) {
             JsonObject s = new JsonObject();
             s.addProperty("index", slot.index());
+            s.addProperty("container_slot", slot.containerSlot());
             s.addProperty("x", slot.x());
             s.addProperty("y", slot.y());
             s.addProperty("role", slot.role());
