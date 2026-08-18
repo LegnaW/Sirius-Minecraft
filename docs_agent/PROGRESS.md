@@ -29,7 +29,7 @@
 - [x] **M1-D**：Python BridgeClient（重连监督、hello 首帧保证、RPC uuid 配对、NEKO 帧回调、事件分发 seq 校验）；29 测试，累计 191 绿；CLI 对 mock 实测
 - [x] **M1-E**：真机验收 PASS（HMCL 1.21.1-Sirius + sirius_bridge jar）：token 握手、12 能力协商、getStats/world.query 未进世界优雅降级 in_game:false、854x480 截图存盘（72KB JPEG，VLM 确认为完整标题画面）；证据 docs_agent/m1-evidence/m1e_screenshot.jpg
 - [x] **1.21.1 API 坑记录**（M1-C 报告，M2 必读）：GUI 画进主渲染目标→Screenshot.takeScreenshot 即含 GUI；Minecraft.execute 任务帧首执行但最小化时饿死→latch 超时；NativeImage 小端 ABGR 转 ARGB；Holder.getRegisteredName() 拿注册名
-- [x] **文档基建轮（2026-08-18）**：双层文档体系落位——`docs_agent/`（原 docs_for_agents 改名归位 + 新增 DEVELOPMENT.md / dev-journey.md / session/）与 `docs_human/`（overall.md 全局技术文档，人读）；根 README 建立；工作方式固化为 brainstorm→spec→门禁循环（见 DEVELOPMENT.md §5/§6）
+- [x] **文档基建轮（2026-08-18）**：双层文档体系落位——`docs_agent/`（原 docs_for_agents 改名归位 + 新增 DEVELOPMENT.md / dev-journey.md / session/）与 `docs_human/`（overall.md 全局技术文档，人读）；根 README 建立；工作方式固化为 `RULES.md`（开工必读唯一权威）+ 根 `AGENTS.md` 自动加载入口；同日双门禁全过（pytest 191 + gradlew smoke 45）
 
 ## 进行中
 
@@ -46,7 +46,7 @@
 
 ## 工程约定
 
-- **双层文档分工**：`docs_agent/` 给 agent 读（准确完备，本目录）；`docs_human/` 给人读（突出重点、可读性优先，内容不得与 docs_agent 权威冲突）。每轮开工读 DEVELOPMENT.md/dev-journey.md/session 近期日志，方案确认后落 `session/YYYY-MM-DD.md`，收尾过 6 项门禁（全流程见 DEVELOPMENT.md §5/§6）
+- **双层文档分工**：`docs_agent/` 给 agent 读（准确完备，本目录）；`docs_human/` 给人读（突出重点、可读性优先，内容不得与 docs_agent 权威冲突）。**开工先读 `docs_agent/RULES.md`**（工作方式唯一权威：流程/门禁/文档地图；仓库根 `AGENTS.md` 是 agent 自动加载的入口指针）。每轮方案确认后落 `session/YYYY-MM-DD.md`，收尾过 6 项门禁（全流程见 RULES.md）
 - **子代理工作报告**：每个任务完成时在 `docs_agent/reports/<里程碑>-<任务>.md` 留报告（模板 template.md，索引 README.md）；主管验收后随代码提交。目的：任何开发者不看会话历史即可接手
 - **脚手架元数据逐字段核对**：模板默认值（license/author/url 等）不能只看构建通过（M0-T4 的 MIT 教训）
 
