@@ -6,7 +6,9 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.fml.loading.FMLPaths;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.neoforge.client.event.ClientChatReceivedEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.ScreenEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.GameShuttingDownEvent;
 import org.slf4j.Logger;
@@ -55,7 +57,11 @@ public class SiriusBridge {
     /** Starts the server once the client finished its initial loading. */
     private void onClientTick(ClientTickEvent.Post event) {
         if (server != null) {
-            return; // already started (listener stays registered but is a no-op)
+            // M2-B: the event push channel's tick sampler (danger states ~1/s,
+            // screenshot stream grabs ~1Hz while subscribed) rides the same
+            // listener - it must run on the client main/render thread anyway.
+            server.eventPusher().onClientTick();
+            return; // server already started
         }
         Minecraft client = Minecraft.getInstance();
         if (client.getOverlay() != null) {
@@ -83,11 +89,30 @@ public class SiriusBridge {
             AuditLog audit = AuditLog.create(gameDir);
             server = new BridgeServer(config, audit);
             server.startAsync();
+            registerEventListeners();
             LOGGER.info("sirius-bridge: connect with ws://127.0.0.1:{} (token: config/sirius_bridge.toml "
                     + "or logs/sirius_bridge.log)", config.port);
         } catch (Exception e) {
             LOGGER.error("sirius-bridge: failed to start the WebSocket server", e);
         }
+    }
+
+    /**
+     * M2-B: wires the NeoForge game-event sources (chat lines, GUI
+     * open/close) into the bridge's event push channel, right after the
+     * server exists. The handlers run on the client main thread and merely
+     * extract data - delivery, filtering and seq assignment all happen in
+     * {@link EventPusher#push}, which is thread-safe. The tick sampler is
+     * NOT registered here: it rides the existing {@link #onClientTick}
+     * listener (see there).
+     */
+    private void registerEventListeners() {
+        EventPusher pusher = server.eventPusher();
+        NeoForge.EVENT_BUS.addListener(pusher::onChatReceived);
+        NeoForge.EVENT_BUS.addListener(pusher::onScreenOpening);
+        NeoForge.EVENT_BUS.addListener(pusher::onScreenClosing);
+        LOGGER.info("sirius-bridge: event push channel armed (chat/gui_open/gui_close + danger sampler"
+                + " + screenshot stream; clients must events.subscribe to receive anything)");
     }
 
     /**

@@ -37,6 +37,15 @@ public final class ToolContext {
         return method;
     }
 
+    /**
+     * The calling connection (package-private: only bridge-internal tools
+     * that need per-connection state - M2-B {@code events.subscribe} - use
+     * it; everything else goes through {@link #send}/{@link #audit}).
+     */
+    WebSocket connection() {
+        return connection;
+    }
+
     /** Queues work on the client main (render) thread - mandatory for game state. */
     public void onMainThread(Runnable action) {
         Minecraft.getInstance().execute(action);

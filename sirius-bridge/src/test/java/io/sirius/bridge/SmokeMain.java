@@ -11,19 +11,22 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
 /**
- * In-process smoke test for the M1-C perception tools and the M2-A pure
- * input logic (run via {@code gradlew smokeTest}). No game, no client: it
- * exercises the pure halves - parameter validation, bbox cropping, the JPEG
- * budget ladder, response assembly, block scanning and entity filtering,
- * plus the key-name -> GLFW keycode table, the rate-limiter token bucket,
- * input param validation and evidence file naming - exactly the logic that
- * would otherwise only be verifiable inside a running Minecraft.
+ * In-process smoke test for the M1-C perception tools, the M2-A pure input
+ * logic and the M2-B event push channel (run via {@code gradlew smokeTest}).
+ * No game, no client: it exercises the pure halves - parameter validation,
+ * bbox cropping, the JPEG budget ladders, response assembly, block scanning
+ * and entity filtering, the key-name -> GLFW keycode table, the rate-limiter
+ * token bucket, input param validation and evidence file naming, plus event
+ * subscription matching, notification frame assembly, the screenshot stream
+ * throttle state machine and the streaming budget ladder - exactly the logic
+ * that would otherwise only be verifiable inside a running Minecraft.
  *
  * <p>Exit code 0 = all checks passed; any failure prints the check name and
  * exits 1.
@@ -43,6 +46,9 @@ public final class SmokeMain {
         inputContracts();
         evidenceNaming();
         bridgeConfig();
+        eventsContracts();
+        streamThrottle();
+        streamLadder();
 
         System.out.println();
         System.out.println("smoke: " + passed + " passed, " + failures.size() + " failed");
@@ -425,6 +431,8 @@ public final class SmokeMain {
         ImageOps.Encoded flat = ImageOps.encodeWithinBudget(gradient, 80);
         check(!flat.downscaled() && flat.base64Length() <= ImageOps.MAX_BASE64_LENGTH,
                 "image: small image within budget without downscale");
+        check(flat.width() == 64 && flat.height() == 48,
+                "image: 2MB overload reports the encoded dimensions");
 
         // --- budget: 4K incompressible noise must degrade (4K noise at q40 still
         // overruns 2MB of base64, so the ladder has to reach the 1024px scale).
@@ -523,6 +531,227 @@ public final class SmokeMain {
         check(ToolContracts.filterEntities(crowd, 0, 64, 0, 16).get("count").getAsInt()
                         == ToolContracts.ENTITIES_CAP,
                 "contracts: entities capped at " + ToolContracts.ENTITIES_CAP);
+    }
+
+    // ------------------------------------------------------------------ M2-B: events
+
+    private static void eventsContracts() throws Exception {
+        EventsContracts.EventLevel CRITICAL = EventsContracts.EventLevel.CRITICAL;
+        EventsContracts.EventLevel WARNING = EventsContracts.EventLevel.WARNING;
+        EventsContracts.EventLevel INFO = EventsContracts.EventLevel.INFO;
+
+        // --- level ordering + parsing
+        check(CRITICAL.atLeast(WARNING) && WARNING.atLeast(INFO) && CRITICAL.atLeast(CRITICAL)
+                        && !INFO.atLeast(WARNING) && !WARNING.atLeast(CRITICAL),
+                "events: level ordering CRITICAL > WARNING > INFO");
+        check(EventsContracts.EventLevel.fromName("critical") == CRITICAL
+                        && EventsContracts.EventLevel.fromName("WARNING") == WARNING
+                        && EventsContracts.EventLevel.fromName("nope") == null
+                        && EventsContracts.EventLevel.fromName(null) == null,
+                "events: level name parsing (case-insensitive, unknown/null -> null)");
+
+        // --- subscription matching: exact / wildcard / empty / level filter
+        EventsContracts.Subscription all = new EventsContracts.Subscription(java.util.Set.of("*"), null);
+        check(all.matches("chat", INFO) && all.matches("death", CRITICAL),
+                "events: \"*\" subscription matches every type");
+        EventsContracts.Subscription empty = new EventsContracts.Subscription(java.util.Set.of(), WARNING);
+        check(empty.matches("chat", WARNING) && empty.matches("death", CRITICAL) && !empty.matches("chat", INFO),
+                "events: empty types = all types, min_level still filters");
+        EventsContracts.Subscription chatOnly = new EventsContracts.Subscription(java.util.Set.of("chat"), null);
+        check(chatOnly.matches("chat", INFO) && !chatOnly.matches("gui_open", WARNING),
+                "events: exact type match, other types rejected");
+        EventsContracts.Subscription criticalOnly =
+                new EventsContracts.Subscription(java.util.Set.of("death", "fire"), CRITICAL);
+        check(criticalOnly.matches("death", CRITICAL) && !criticalOnly.matches("chat", CRITICAL),
+                "events: exact types + CRITICAL floor");
+        check(new EventsContracts.Subscription(java.util.Set.of("chat"), null).effectiveMinLevel() == INFO,
+                "events: null min_level defaults to INFO (no filtering)");
+
+        // --- events.subscribe params (frozen schema tools/events.subscribe.json)
+        EventsContracts.SubscribeParams p = validParams(() ->
+                EventsContracts.subscribeParams(json("{\"types\":[\"chat\",\"death\"]}")));
+        check(p.types().size() == 2 && p.types().contains("chat") && p.types().contains("death")
+                        && p.minLevel() == null,
+                "events.subscribe: types parsed, min_level defaults null");
+        p = validParams(() -> EventsContracts.subscribeParams(
+                json("{\"types\":[\"*\"],\"min_level\":\"CRITICAL\"}")));
+        check(p.types().contains("*") && p.minLevel() == CRITICAL,
+                "events.subscribe: wildcard + CRITICAL min_level parsed");
+        p = validParams(() -> EventsContracts.subscribeParams(json("{\"types\":[]}")));
+        check(p.types().isEmpty(), "events.subscribe: empty types array accepted (= all events)");
+        p = validParams(() -> EventsContracts.subscribeParams(
+                json("{\"types\":[\"chat\"],\"min_level\":null}")));
+        check(p.minLevel() == null, "events.subscribe: explicit null min_level accepted");
+        p = validParams(() -> EventsContracts.subscribeParams(
+                json("{\"types\":[\"chat\",\"chat\"]}")));
+        check(p.types().size() == 1, "events.subscribe: duplicate types collapse");
+
+        expectInvalid(() -> EventsContracts.subscribeParams(json("{}")),
+                "events.subscribe: missing types rejected");
+        expectInvalid(() -> EventsContracts.subscribeParams(json("{\"types\":\"chat\"}")),
+                "events.subscribe: non-array types rejected");
+        expectInvalid(() -> EventsContracts.subscribeParams(json("{\"types\":[42]}")),
+                "events.subscribe: non-string type entry rejected");
+        expectInvalid(() -> EventsContracts.subscribeParams(json("{\"types\":null}")),
+                "events.subscribe: null types rejected");
+        expectInvalid(() -> EventsContracts.subscribeParams(
+                json("{\"types\":[\"chat\"],\"min_level\":\"LOUD\"}")),
+                "events.subscribe: unknown min_level rejected");
+        expectInvalid(() -> EventsContracts.subscribeParams(
+                json("{\"types\":[\"chat\"],\"min_level\":3}")),
+                "events.subscribe: numeric min_level rejected");
+
+        // --- subscribe result shape
+        JsonObject result = EventsContracts.subscribeResult(
+                new EventsContracts.SubscribeParams(new java.util.LinkedHashSet<>(List.of("chat", "gui_open")),
+                        WARNING));
+        check(result.get("subscribed").getAsBoolean()
+                        && result.get("types").getAsJsonArray().size() == 2
+                        && "WARNING".equals(result.get("min_level").getAsString())
+                        && result.get("note").getAsString().contains("no pushes"),
+                "events.subscribe: result echoes types/min_level/note");
+        JsonObject defaultLevel = EventsContracts.subscribeResult(
+                new EventsContracts.SubscribeParams(java.util.Set.of("chat"), null));
+        check("INFO".equals(defaultLevel.get("min_level").getAsString()),
+                "events.subscribe: result echoes effective INFO default");
+
+        // --- notification frame assembly
+        JsonObject data = new JsonObject();
+        data.addProperty("hp", 3);
+        JsonObject frame = EventsContracts.notification("fire", data, CRITICAL, 1724000000.5, 7);
+        check("notification".equals(frame.get("type").getAsString())
+                        && "fire".equals(frame.get("event").getAsString()),
+                "events: notification type/event fields");
+        check(frame.get("data").getAsJsonObject().get("hp").getAsInt() == 3
+                        && "CRITICAL".equals(frame.get("data").getAsJsonObject().get("level").getAsString()),
+                "events: level injected into data alongside original fields");
+        check(frame.get("timestamp").getAsJsonPrimitive().isNumber()
+                        && frame.get("timestamp").getAsDouble() == 1724000000.5,
+                "events: timestamp is a float number (epoch seconds)");
+        check(frame.get("seq").getAsJsonPrimitive().isNumber()
+                        && frame.get("seq").getAsLong() == 7
+                        && frame.get("seq").getAsDouble() == 7.0,
+                "events: seq is an integral number");
+        check(!data.has("level"),
+                "events: caller data object not mutated (deep copy)");
+        JsonObject preset = new JsonObject();
+        preset.addProperty("level", "INFO");
+        frame = EventsContracts.notification("x", preset, CRITICAL, 0.0, 0);
+        check("INFO".equals(frame.get("data").getAsJsonObject().get("level").getAsString()),
+                "events: existing data.level wins over injected level");
+        frame = EventsContracts.notification("x", null, WARNING, 0.0, 0);
+        check(frame.get("data").getAsJsonObject().size() == 1
+                        && frame.get("data").getAsJsonObject().has("level"),
+                "events: null data yields level-only payload");
+        check(EventsContracts.timestampNowSeconds(1724000000123L) == 1724000000.123,
+                "events: milliseconds -> epoch seconds conversion (Python time.time() units)");
+    }
+
+    private static void streamThrottle() {
+        // Deterministic injected clock; 6s window like the real stream.
+        EventsContracts.StreamThrottle<String> throttle =
+                new EventsContracts.StreamThrottle<>(6_000);
+
+        check(throttle.offer("a", 0) == EventsContracts.StreamThrottle.Decision.PUSH_NOW,
+                "throttle: first frame pushes immediately");
+        check(throttle.offer("b", 5_000) == EventsContracts.StreamThrottle.Decision.DEFER
+                        && throttle.hasPending(),
+                "throttle: frame inside window defers to pending slot");
+        check(throttle.takeDue(5_999) == null,
+                "throttle: flush not due before the boundary");
+        check(throttle.offer("c", 5_500) == EventsContracts.StreamThrottle.Decision.DEFER,
+                "throttle: deferred frame replaces pending (latest wins)");
+        check("c".equals(throttle.takeDue(6_000)) && !throttle.hasPending(),
+                "throttle: delayed flush fires at the boundary with the newest frame");
+        check(throttle.offer("d", 11_999) == EventsContracts.StreamThrottle.Decision.DEFER,
+                "throttle: window closed again right after a boundary flush");
+        check(throttle.offer("d", 12_000) == EventsContracts.StreamThrottle.Decision.PUSH_NOW,
+                "throttle: window reopens exactly min-interval after the flush");
+
+        // PUSH_NOW cancels an armed flush and clears the slot (N.E.K.O race note).
+        EventsContracts.StreamThrottle<String> armed =
+                new EventsContracts.StreamThrottle<>(6_000);
+        armed.offer("a", 0);
+        armed.offer("b", 1_000);
+        check(armed.flushAtMs() == 6_000,
+                "throttle: one flush armed at window-open time");
+        check(armed.offer("c", 7_000) == EventsContracts.StreamThrottle.Decision.PUSH_NOW,
+                "throttle: window reopened by wall clock");
+        check(armed.flushAtMs() == -1 && !armed.hasPending(),
+                "throttle: immediate push disarms flush and clears pending slot");
+        check(armed.takeDue(8_000) == null,
+                "throttle: no stale flush surfaces an older frame");
+
+        EventsContracts.StreamThrottle<String> zero =
+                new EventsContracts.StreamThrottle<>(0);
+        check(zero.offer("x", 1) == EventsContracts.StreamThrottle.Decision.PUSH_NOW
+                        && zero.offer("y", 1) == EventsContracts.StreamThrottle.Decision.PUSH_NOW,
+                "throttle: zero interval never defers");
+    }
+
+    private static void streamLadder() throws Exception {
+        // --- ladder parameterization
+        check(Arrays.equals(ImageOps.streamQualityLadder(80), new int[]{80, 65, 50, 40, 30}),
+                "ladder: quality 80 -> [80,65,50,40,30]");
+        check(Arrays.equals(ImageOps.streamQualityLadder(100), new int[]{100, 65, 50, 40, 30}),
+                "ladder: quality 100 -> [100,65,50,40,30]");
+        check(Arrays.equals(ImageOps.streamQualityLadder(65), new int[]{65, 50, 40, 30}),
+                "ladder: quality 65 -> [65,50,40,30]");
+        check(Arrays.equals(ImageOps.streamQualityLadder(30), new int[]{30}),
+                "ladder: quality 30 stays at 30");
+        check(Arrays.equals(ImageOps.streamQualityLadder(20), new int[]{20}),
+                "ladder: quality below the list floor collapses to itself");
+        check(Arrays.equals(ImageOps.streamEdgeLadder(1024), new int[]{1024, 512, 256}),
+                "ladder: edge 1024 -> [1024,512,256]");
+        check(Arrays.equals(ImageOps.streamEdgeLadder(100), new int[]{100, 50, 25}),
+                "ladder: edge 100 -> [100,50,25]");
+        check(ImageOps.streamEdgeLadder(0).length == 0,
+                "ladder: edge 0 disables scaling (empty ladder)");
+
+        // --- streaming budget encode: incompressible noise forces ladder descent
+        BufferedImage noise = new BufferedImage(800, 600, BufferedImage.TYPE_INT_RGB);
+        java.util.Random random = new Random(7);
+        int[] row = new int[800];
+        for (int y = 0; y < 600; y++) {
+            for (int x = 0; x < 800; x++) {
+                row[x] = random.nextInt(0x1000000);
+            }
+            noise.setRGB(0, y, 800, 1, row, 0, 800);
+        }
+        ImageOps.Encoded stream = ImageOps.encodeWithinBudget(noise, EventsContracts.STREAM_QUALITY,
+                EventsContracts.STREAM_MAX_BASE64, EventsContracts.STREAM_LONGEST_EDGE);
+        BufferedImage decoded = ImageIO.read(new ByteArrayInputStream(stream.jpeg()));
+        check(stream.base64Length() <= EventsContracts.STREAM_MAX_BASE64,
+                "ladder: noise stream frame ends within the 100KB budget ("
+                        + stream.base64Length() + " b64 chars)");
+        check(stream.quality() <= EventsContracts.STREAM_QUALITY
+                        && Math.max(decoded.getWidth(), decoded.getHeight()) <= EventsContracts.STREAM_LONGEST_EDGE,
+                "ladder: descent respected quality cap and edge cap (q" + stream.quality()
+                        + " " + decoded.getWidth() + "x" + decoded.getHeight() + ")");
+        check(stream.downscaled() && stream.width() == decoded.getWidth()
+                        && stream.height() == decoded.getHeight(),
+                "ladder: Encoded reports downscaled + the encoded image's dimensions");
+
+        // --- small image, generous budget: first rung, no descent
+        BufferedImage flat = new BufferedImage(64, 48, BufferedImage.TYPE_INT_RGB);
+        ImageOps.Encoded easy = ImageOps.encodeWithinBudget(flat, 80, EventsContracts.STREAM_MAX_BASE64, 1024);
+        check(!easy.downscaled() && easy.quality() == 80 && easy.width() == 64 && easy.height() == 48,
+                "ladder: tiny image stays at first rung unscaled");
+
+        // --- impossible budget: ship the smallest attempt, never drop the frame
+        ImageOps.Encoded lastResort = ImageOps.encodeWithinBudget(noise, 80, 500, 1024);
+        check(lastResort != null && lastResort.jpeg().length > 0 && lastResort.base64Length() > 500,
+                "ladder: unreachable budget ships the smallest attempt (no drop)");
+        check(lastResort.quality() == 30 && lastResort.downscaled(),
+                "ladder: smallest attempt is the last rung (q30, scaled)");
+
+        // --- ring buffer maxlen (spec: 3 frames)
+        ArrayDeque<Integer> ring = new ArrayDeque<>();
+        for (int i = 1; i <= 5; i++) {
+            EventsContracts.ringAdd(ring, i, EventsContracts.STREAM_RING_SIZE);
+        }
+        check(ring.size() == EventsContracts.STREAM_RING_SIZE && ring.peekFirst() == 3 && ring.peekLast() == 5,
+                "events: ring buffer keeps the 3 newest frames, oldest evicted");
     }
 
     // ------------------------------------------------------------------ helpers

@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The bridge WebSocket server - the "body" the Sirius brain connects to.
@@ -65,10 +66,18 @@ public final class BridgeServer extends WebSocketServer {
                 return t;
             });
 
-    /** Per-connection handshake state. */
-    private static final class ClientSession {
+    /**
+     * Per-connection handshake + subscription state. Package-private: the
+     * M2-B {@link EventPusher} reads the subscription and allocates
+     * per-connection notification {@code seq} values from here.
+     */
+    static final class ClientSession {
         volatile boolean authenticated;
         volatile ScheduledFuture<?> helloDeadline;
+        /** Event subscription; null = unsubscribed (default: no pushes at all). */
+        volatile EventsContracts.Subscription subscription;
+        /** Per-connection notification counter; first delivered frame gets 0. */
+        private final AtomicLong eventSeq = new AtomicLong();
 
         /** Auth transition is guarded so the watchdog cannot race the hello. */
         synchronized boolean authenticate() {
@@ -83,24 +92,74 @@ public final class BridgeServer extends WebSocketServer {
             }
             return true;
         }
+
+        /** Sets/changes the event subscription (volatile write, any thread). */
+        void setSubscription(EventsContracts.Subscription subscription) {
+            this.subscription = subscription;
+        }
+
+        /** Consumes the next notification seq for this connection (starts at 0). */
+        long nextEventSeq() {
+            return eventSeq.getAndIncrement();
+        }
     }
+
+    /** The M2-B event push channel (single emit choke point for notifications). */
+    private final EventPusher eventPusher;
 
     public BridgeServer(BridgeConfig config, AuditLog audit) {
         super(new InetSocketAddress("127.0.0.1", config.port));
         this.config = config;
         this.audit = audit;
+        this.eventPusher = new EventPusher(this);
         setReuseAddr(true);
-        // Built-in tool implementations. M1-C adds screenshot/getStats/world.query
-        // and M2-A the input.* primitives by registering handlers here - dispatcher
-        // untouched.
+        // Built-in tool implementations. M1-C adds screenshot/getStats/world.query,
+        // M2-A the input.* primitives and M2-B events.subscribe by registering
+        // handlers here - dispatcher untouched.
         tools.register("capabilities/list", (ctx, params) ->
                 Json.capabilitiesResponse(ctx.id(), Capabilities.list(), Capabilities.PROTOCOL_VERSION));
         PerceptionTools.registerAll(tools);
         InputTools.registerAll(tools, config);
+        tools.register("events.subscribe", this::subscribeEvents);
     }
 
     AuditLog audit() {
         return audit;
+    }
+
+    /** The event push channel (M2-B); SiriusBridge wires its NeoForge listeners to this. */
+    EventPusher eventPusher() {
+        return eventPusher;
+    }
+
+    /** Live session map for the event pusher's delivery loop (package-private). */
+    Map<WebSocket, ClientSession> sessionsView() {
+        return sessions;
+    }
+
+    // ------------------------------------------------------------------ events.subscribe (M2-B)
+
+    /**
+     * {@code events.subscribe({types: [...], min_level?})}: installs (or
+     * replaces) the calling connection's event subscription. Params follow
+     * the frozen schema {@code sirius-brain/schema/tools/events.subscribe.json}
+     * ({@code types}: REQUIRED array of strings - empty or {@code "*"} = all
+     * events; {@code min_level}: CRITICAL/WARNING/INFO or null, default
+     * INFO); violations answer {@code -32602} like every other tool.
+     */
+    private JsonObject subscribeEvents(ToolContext ctx, JsonObject params) {
+        final EventsContracts.SubscribeParams parsed;
+        try {
+            parsed = EventsContracts.subscribeParams(params);
+        } catch (ToolContracts.InvalidParams e) {
+            return Json.errorResponse(ctx.id(), Json.INVALID_PARAMS, e.getMessage(), null);
+        }
+        ClientSession session = session(ctx.connection());
+        session.setSubscription(new EventsContracts.Subscription(parsed.types(), parsed.minLevel()));
+        audit.event("SUBSCRIBE", "remote=" + remote(ctx.connection())
+                + " types=" + (parsed.types().isEmpty() ? "*" : parsed.types())
+                + " min_level=" + session.subscription.effectiveMinLevel().name());
+        return Json.okResponse(ctx.id(), EventsContracts.subscribeResult(parsed));
     }
 
     // ------------------------------------------------------------------ lifecycle
@@ -123,6 +182,7 @@ public final class BridgeServer extends WebSocketServer {
         }
         scheduler.shutdownNow();
         InputTools.shutdown();
+        eventPusher.shutdown();
         try {
             this.stop(1000);
         } catch (InterruptedException e) {

@@ -10,8 +10,10 @@ import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Iterator;
+import java.util.List;
 
 /**
  * Pure image pipeline for the {@code screenshot} tool: bbox cropping, JPEG
@@ -25,8 +27,9 @@ import java.util.Iterator;
  * if it still overruns, the image is scaled so its longest edge is
  * {@link #DOWNSCALE_LONGEST_EDGE}px and the ladder repeats. The response
  * reports {@code downscaled=true} whenever the fallback scale was needed.
- * (The ~100KB streaming budget from spec 8.2 is a separate concern for the
- * future event-push pipeline; on-demand RPC screenshots stay high quality.)
+ * (The ~100KB streaming budget from spec 8.2 is served by the separate
+ * 4-argument {@link #encodeWithinBudget(BufferedImage, int, int, int)}
+ * ladder added in M2-B; on-demand RPC screenshots stay high quality.)
  */
 public final class ImageOps {
 
@@ -42,8 +45,14 @@ public final class ImageOps {
     private ImageOps() {
     }
 
-    /** Result of the budgeted encode: JPEG bytes + metadata about the path taken. */
-    public record Encoded(byte[] jpeg, int quality, boolean downscaled) {
+    /**
+     * Result of the budgeted encode: JPEG bytes + metadata about the path
+     * taken. {@code width}/{@code height} are the dimensions of the image
+     * that was actually encoded (after any ladder scaling) - the streaming
+     * pipeline reports them in its notification payload because it never
+     * sees the scaled intermediate itself.
+     */
+    public record Encoded(byte[] jpeg, int quality, boolean downscaled, int width, int height) {
 
         /** Length the base64 text of {@link #jpeg()} will have. */
         public int base64Length() {
@@ -122,6 +131,11 @@ public final class ImageOps {
      * scales to longest edge {@link #DOWNSCALE_LONGEST_EDGE}px and repeats
      * the ladder. A pathological image that overruns even the last rung is
      * returned as-is (never fails the request).
+     *
+     * <p>Real-machine verified in M1-C; this overload's ladder deliberately
+     * stays EXACTLY as it was (quality descent first, single fallback scale)
+     * and must not be re-expressed through the 4-argument streaming ladder,
+     * whose rung order and quality list differ.
      */
     public static Encoded encodeWithinBudget(BufferedImage image, int quality) throws IOException {
         BufferedImage current = image;
@@ -130,7 +144,7 @@ public final class ImageOps {
         for (int attempt = 0; attempt < 2; attempt++) {
             for (int q : qualityLadder(quality)) {
                 byte[] jpeg = encodeJpeg(current, q);
-                last = new Encoded(jpeg, q, scaled);
+                last = new Encoded(jpeg, q, scaled, current.getWidth(), current.getHeight());
                 if (base64Length(jpeg) <= MAX_BASE64_LENGTH) {
                     return last;
                 }
@@ -139,6 +153,103 @@ public final class ImageOps {
             scaled = true;
         }
         return last; // safety valve: over budget but delivered
+    }
+
+    /**
+     * Streaming-budget encode (M2-B, spec 8.2 ~100KB pipeline; ladder adopted
+     * from N.E.K.O service.py:1241-1307): quality-first descent
+     * {@code [quality, 65, 50, 40, 30]} (never above the requested quality)
+     * crossed with an edge ladder {@code [maxLongestEdge, /2, /4]} - for each
+     * quality the image shrinks step by step before quality is given up
+     * further. The FIRST combination whose base64 length fits
+     * {@code maxBase64Length} wins; if nothing fits, the SMALLEST attempt is
+     * shipped anyway ({@code downscaled=true} when any scaling happened) - a
+     * frame is never dropped for budget reasons, matching N.E.K.O's
+     * "ship smallest with a warning" policy.
+     *
+     * <p>{@code maxLongestEdge <= 0} disables scaling (encode at native size,
+     * quality ladder only). Dimensions of the actually-encoded image are
+     * reported in the {@link Encoded} record.
+     */
+    public static Encoded encodeWithinBudget(BufferedImage image, int quality,
+                                             int maxBase64Length, int maxLongestEdge) throws IOException {
+        int[] qualities = streamQualityLadder(quality);
+        int[] edges = streamEdgeLadder(maxLongestEdge);
+        int sourceEdge = Math.max(image.getWidth(), image.getHeight());
+
+        // Pre-scale once per edge rung (reused across the quality list).
+        BufferedImage[] frames = new BufferedImage[edges.length];
+        for (int i = 0; i < edges.length; i++) {
+            frames[i] = scaleLongestEdge(image, edges[i]);
+        }
+        if (edges.length == 0) { // scaling disabled -> single native-size rung
+            edges = new int[]{sourceEdge};
+            frames = new BufferedImage[]{image};
+        }
+
+        Encoded smallest = null;
+        for (int q : qualities) {
+            for (int i = 0; i < frames.length; i++) {
+                BufferedImage frame = frames[i];
+                byte[] jpeg = encodeJpeg(frame, q);
+                boolean downscaled = Math.max(frame.getWidth(), frame.getHeight()) < sourceEdge;
+                Encoded candidate = new Encoded(jpeg, q, downscaled, frame.getWidth(), frame.getHeight());
+                if (base64Length(jpeg) <= maxBase64Length) {
+                    return candidate;
+                }
+                if (smallest == null || jpeg.length < smallest.jpeg().length) {
+                    smallest = candidate;
+                }
+            }
+        }
+        return smallest; // over budget but delivered - never drop the frame
+    }
+
+    /**
+     * The streaming quality ladder: {@code [start, 65, 50, 40, 30]} capped at
+     * {@code start} (never encode above the requested quality), de-duplicated
+     * and descending; a {@code start} below 30 collapses to just
+     * {@code [start]}.
+     */
+    static int[] streamQualityLadder(int start) {
+        int q0 = Math.max(1, Math.min(100, start));
+        List<Integer> ladder = new ArrayList<>();
+        for (int q : new int[]{q0, 65, 50, 40, 30}) {
+            if (q <= q0 && !ladder.contains(q)) {
+                ladder.add(q);
+            }
+        }
+        if (ladder.isEmpty()) {
+            ladder.add(q0);
+        }
+        int[] out = new int[ladder.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = ladder.get(i);
+        }
+        return out;
+    }
+
+    /**
+     * The streaming edge ladder: {@code [maxEdge, maxEdge/2, maxEdge/4]},
+     * positive values only, de-duplicated (an edge of 1024 yields
+     * 1024/512/256). {@code maxEdge <= 0} yields an empty ladder (scaling
+     * disabled).
+     */
+    static int[] streamEdgeLadder(int maxEdge) {
+        if (maxEdge <= 0) {
+            return new int[0];
+        }
+        List<Integer> ladder = new ArrayList<>();
+        for (int e : new int[]{maxEdge, maxEdge / 2, maxEdge / 4}) {
+            if (e > 0 && !ladder.contains(e)) {
+                ladder.add(e);
+            }
+        }
+        int[] out = new int[ladder.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = ladder.get(i);
+        }
+        return out;
     }
 
     /**

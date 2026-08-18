@@ -2,11 +2,13 @@
 
 NeoForge mod running on the **real Minecraft client**, acting as the "eyes and hands" of the Sirius AI brain: screenshot capture, input injection, and event push. See `../docs_agent/sirius-technical.md` §8.2 for the full spec.
 
-> Current status: **M2-A input primitives implemented** - the four `input.*`
-> tools inject real GLFW-style events through the vanilla dispatch pipeline
-> (rate-limited, audited, GUI-click evidence shots). Together with the M1-C
-> perception tools (`screenshot`, `getStats`, `world.query`) the bridge now
-> has both "eyes" and "hands". `look*`/`getGuiState` and event push land in M2+.
+> Current status: **M2-B event push implemented** - the bridge now pushes
+> `notification` frames (chat, GUI open/close, danger states, a throttled
+> ~100KB screenshot stream) to clients that subscribe with `events.subscribe`.
+> Together with the M2-A input primitives (`input.*`) and the M1-C perception
+> tools (`screenshot`, `getStats`, `world.query`) the bridge has "eyes",
+> "hands" and a passive attention channel. `look*`/`getGuiState` and
+> `events.watch` land in M3+.
 
 ## Versions
 
@@ -73,13 +75,15 @@ keep_running_unfocused = true # disable vanilla pause-on-lost-focus at runtime (
 | `request` `getStats` | see "The perception tools" below |
 | `request` `world.query` | see "The perception tools" below |
 | `request` `input.key` / `input.text` / `input.mouseMove` / `input.click` | see "The input tools" below |
-| `request` any other method | `-32601` `not implemented: <method>` (until M2) |
-| `task` (NEKO) | immediate `task_finished` `status=interrupted` `text="not implemented"`, `task_id` echoed verbatim (placeholder until M2) |
+| `request` `events.subscribe` | see "The event push channel" below |
+| `request` any other method | `-32601` `not implemented: <method>` (until M3) |
+| `task` (NEKO) | immediate `task_finished` `status=interrupted` `text="not implemented"`, `task_id` echoed verbatim (placeholder until M3) |
 | invalid JSON | `-32700` parse error |
 | non-object JSON / unknown frame type / malformed request | `-32600` invalid frame |
 
-Response frames always carry `type/id/result/error` exactly as the frozen
-schema (`sirius-brain/schema/frames/`) prescribes.
+Mod -> brain frames: `response` (always carries `type/id/result/error`
+exactly as the frozen schema prescribes) and `notification` (M2-B,
+outbound-only - see below).
 
 ## The perception tools (M1-C)
 
@@ -351,6 +355,104 @@ stops draining `Minecraft.execute` tasks, so tools answer `-32603` after the
 10 s latch timeout instead of hanging. Unfocused-but-visible is the supported
 "human alt-tabs away" case.
 
+## The event push channel (M2-B)
+
+The mod -> brain direction of the protocol: once a client subscribes, the
+bridge pushes `notification` frames the moment something happens in the
+game - the brain no longer has to poll.
+
+```json
+{"type":"notification","event":"chat",
+ "data":{"message":"<Steve> hi","system":false,"sender":"<uuid>","level":"INFO"},
+ "timestamp":1755470400.123,"seq":0}
+```
+
+- **`timestamp`** is epoch **seconds** as a float (matches Python
+  `time.time()`; the Python `NotificationFrame` model requires a float).
+- **`seq`** is per-connection, starts at 0, increments by exactly 1 per
+  delivered frame (the brain warns on non-monotonic seq - our side never
+  skips or repeats for a live connection).
+- **`level`** rides inside `data` by convention (the frozen frame model has
+  no level field); the three levels `CRITICAL`/`WARNING`/`INFO` follow the
+  frozen `EventLevel` enum.
+
+### `events.subscribe({ types, min_level })`
+
+- `types`: REQUIRED array of event name strings (schema violations ->
+  `-32602`); `"*"` or an **empty array** = all events.
+- `min_level`: `"CRITICAL"|"WARNING"|"INFO"` or null (default INFO = no
+  level filtering).
+- Response: `{"subscribed":true,"types":[...],"min_level":"INFO",
+  "note":"unsubscribed clients receive no pushes"}`.
+- **A client that never subscribes receives nothing** - pushes are strictly
+  opt-in per connection. Re-subscribing replaces the previous filter (the
+  seq counter continues, it is per-connection, not per-subscription).
+- Each successful subscribe writes a `SUBSCRIBE` audit line.
+
+### Event catalogue
+
+| Event | Level | Fired when | `data` |
+|---|---|---|---|
+| `chat` | INFO | any chat/system line arrives | `message`, `system` (bool), `sender` (uuid; player lines only) |
+| `gui_open` | WARNING | a screen is about to open (`ScreenEvent.Opening`) | `screen` (class simple name, e.g. `InventoryScreen`) |
+| `gui_close` | WARNING | a screen is replaced or closed (`ScreenEvent.Closing` - fires on screen-to-screen switches too) | `screen` |
+| `death` | CRITICAL | player becomes dead-or-dying (edge-triggered) | `health`, `air`, `on_fire` |
+| `fire` | CRITICAL | player catches fire | `health` |
+| `health_low` | CRITICAL | health <= 6.0 | `health`, `threshold` |
+| `drown` | CRITICAL | underwater AND air < 300 | `air` |
+| `screenshot` | INFO | the screenshot stream (below) | `image_b64`, `format`, `width`, `height`, `quality` |
+
+Danger states are sampled every 20 ticks (~1 s) and are **edge-triggered**
+(one event per false->true transition) with a 5 s per-type cooldown to
+suppress flapping (fire flickering on/off, health oscillating around the
+threshold). While dead, the weaker states (fire/health_low/drown) stay
+silent - `death` is the signal. Leaving a world resets the edges.
+
+### The screenshot stream
+
+A push-based visual feed for subscribers of the `screenshot` event, budgeted
+so a frame never breaks the ~100KB wire ceiling (spec 8.2 pipeline,
+parameters adopted from N.E.K.O's production service):
+
+- **Sampling**: the framebuffer is read ~1 Hz (every 20 ticks), and only
+  while at least one subscriber matches the `screenshot` event - an idle
+  bridge costs nothing.
+- **Throttle**: minimum 6 s between pushes. Frames arriving inside a closed
+  window collapse into a single **latest-wins pending slot**; exactly one
+  delayed flush is armed for the window boundary. The newest frame is
+  therefore never lost, only delayed to the boundary (an immediate push
+  cancels an armed flush so a stale frame can never surface after a fresh
+  one).
+- **Budget ladder**: longest edge 1024 + JPEG q80 first; on overrun,
+  quality descends `[80, 65, 50, 40, 30]` (never above the configured
+  quality) crossed with edge halving `[1024, 512, 256]`. The first
+  combination whose **base64 length** fits 100KB wins; if nothing fits, the
+  smallest attempt ships anyway - a frame is never dropped for size.
+- **Ring buffer**: the last 3 encoded frames are kept (spec); only the
+  latest is consumed (reconnect replay is future work).
+- Payload `data` mirrors the `screenshot` RPC response fields
+  (`image_b64`/`format`/`width`/`height`/`quality`, plus the injected
+  `level`).
+
+### Threading
+
+Event sources fire on the client main/render thread (NeoForge chat/screen
+events, the tick sampler); the screenshot encode and the delayed boundary
+flush run on a daemon thread (`sirius-bridge-events`). Delivery
+(`EventPusher.push`) is fully thread-safe: sessions live in a concurrent
+map, subscriptions are volatile, `seq` is an atomic per-connection counter,
+and socket writes are safe from any thread. The framebuffer read reuses
+`PerceptionTools.grabScreen()` (render thread, pixel download only) - the
+render thread never pays for JPEG encoding.
+
+### Honest drop policy
+
+A push to a connection that died between sampling and sending counts as
+dropped: one `EVENT_DROP` audit line plus a counter, never a silent loss
+and never an exception into the game. Shutdown reports the totals
+(`EVENTS_STOP pushed=.. dropped=..`). Stream frames that fail to encode are
+logged and skipped - the next 1 Hz sample replaces them.
+
 ## Build
 
 ```bash
@@ -364,12 +466,14 @@ configuration instead.
 
 `build` also runs the **smoke test** (`gradlew smokeTest`, wired into
 `check`): an in-process `main()` that exercises the pure halves of the
-perception and input tools - parameter validation, bbox cropping, the JPEG
-budget ladder, response assembly, block scan and entity filtering, the
-key-name table, the rate-limiter token bucket, evidence file naming and the
-config parser (incl. `keep_running_unfocused` defaults/round-trips) -
-with no game launched (119 checks; a 4K incompressible-noise image verifies
-the degrade to a 1024 px fallback).
+perception, input and event-push code - parameter validation, bbox cropping,
+both JPEG budget ladders, response assembly, block scan and entity filtering,
+the key-name table, the rate-limiter token bucket, evidence file naming, the
+config parser (incl. `keep_running_unfocused` defaults/round-trips),
+subscription matching, notification frame assembly, the stream throttle state
+machine (injected clock) and the streaming ladder - with no game launched
+(175 checks; a 4K incompressible-noise image verifies the 2MB RPC degrade, an
+800x600 one the 100KB stream ladder).
 
 ## Deploy to test client
 
@@ -403,8 +507,10 @@ src/main/java/io/sirius/bridge/
     ToolContext.java      per-call context: main-thread marshalling + thread-safe send
     PerceptionTools.java  M1-C shells: framebuffer grab, player/level reads (main thread)
     InputTools.java       M2-A shells: event-callback injection, GUI click evidence (main thread)
+    EventPusher.java      M2-B shell: notification emit choke point (chat/gui/danger/screenshot stream)
     ToolContracts.java    pure: param validation + response assembly + world scan logic
     InputContracts.java   pure: input param validation + result assembly + evidence naming
+    EventsContracts.java  pure: event levels, subscription matching, notification shape, stream throttle
     KeyCodes.java         pure: logical key names -> GLFW keycodes (1.21.1 InputConstants values)
     TokenBucket.java      pure: input rate limiter (clock injectable for the smoke test)
     ImageOps.java         pure: crop / JPEG encode / size-budget ladder / base64
@@ -417,8 +523,13 @@ src/main/resources/assets/sirius_bridge/   Asset placeholder
 
 ## Next steps (per §8.2 of the technical spec)
 
-- M2+: `look`/`lookAt`, `getGuiState`, event subscription push (and the
-  ~100 KB screenshot streaming pipeline).
+- M3+: `look`/`lookAt`, `getGuiState`, `events.watch` (stat/condition
+  watches with hysteresis + cooldown - deliberately NOT implemented in M2-B).
+- Natural M2-B extensions: more event sources just call
+  `EventPusher.push` (one method, thread-safe); a reconnect replay could
+  consume the stream ring buffer; the danger catalogue (hunger, weather,
+  attacked) grows in `sampleDanger`.
 - Permission tiers (`observe`/`input_world`/`input_gui`) are deliberately
-  left for M2 proper (M1 implements localhost binding + token handshake,
-  M2-A adds the input rate limiter, master switch and per-input audit).
+  left for later (M1 implements localhost binding + token handshake, M2-A
+  the input rate limiter/master switch/per-input audit, M2-B the push
+  channel with strict opt-in).
