@@ -92,3 +92,11 @@
   - chat 的 message 是 `Component.getString()`：含样式组件的行（点击事件等）只回纯文本，样式元数据不推
   - 事件推送无 QoS：连接半开时 sendFrame 吞异常（debug 日志），由 seq 单调性+大脑侧重连兜底
 - 关联报告：M1-B（会话/分发骨架）、M1-C（grabScreen/截图管线拆分）、M2-A（InputGuard/调度线程模式）、sirius-technical.md §8.2（事件分级/截图流预算管线/推送帧格式）
+
+## 真机验证结果（2026-08-19，主管执行，D 盘机）
+
+- 环境：1.21.1-Sirius 重启加载 M2-B jar（b5c65e7），生存世界
+- `m2b_verify.py` 执行（订阅 "*" → E 开关背包 → T+/say+ENTER → 收流 22s）
+- **PASS（一次通过）**：10 帧——gui_open/gui_close×2 组（E 背包 + T 聊天屏）WARNING、chat INFO、screenshot×5 INFO；seq 0-9 严格单调；level 全部在 data 内；截图 b64 62320/50688/49924/49352/49380 全部 ≤100KB；首帧立即推、后续按 ≥6s 间隔（22s 收 5 帧，符合含首帧的节律）
+- 证据：`docs_agent/m2-evidence/m2b_stream_last.jpg`；脚本 `m2b_verify.py`（可重复）
+- 未在本机覆盖（M2-C/收官顺带或按需）：CRITICAL 危险态实测（/effect 点火/生命）、无订阅不推、限流
