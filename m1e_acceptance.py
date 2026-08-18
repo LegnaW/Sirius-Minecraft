@@ -20,7 +20,7 @@ from sirius_brain.bridge.client import BridgeClient  # noqa: E402
 from sirius_brain.bridge.config import BridgeConfig  # noqa: E402
 
 TOML = ROOT / ".minecraft/versions/1.21.1-Sirius/config/sirius_bridge.toml"
-OUT_DIR = ROOT / "docs_for_agents/m1-evidence"
+OUT_DIR = ROOT / "docs_agent/m1-evidence"
 URL = "ws://127.0.0.1:8765"
 
 
