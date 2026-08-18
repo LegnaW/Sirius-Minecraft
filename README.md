@@ -14,7 +14,7 @@ sirius-brain（Python 大脑）══ WebSocket ══▶ sirius-bridge（NeoFor
 | `sirius-brain/` | Python 后端大脑：协议权威（pydantic）、mock 假身体、BridgeClient |
 | `sirius-bridge/` | NeoForge 客户端 Mod（Java 21，MC 1.21.1）：AI 的眼与手 |
 | `docs_human/` | **给人读**：[overall.md](./docs_human/overall.md) 全局技术文档（从一段话到贴源码的细节设计） |
-| `docs_agent/` | **给开发 agent 读**：设计权威、开发手册、进度锚点、历史决策、任务报告 |
+| `docs_agent/` | **给开发 agent 读**：[RULES.md](./docs_agent/RULES.md) 工作规则（开工必读）、设计权威、开发手册、进度锚点、历史决策、任务报告 |
 
 ## 快速了解
 
