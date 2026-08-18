@@ -5,7 +5,7 @@
 > GitHub 仓库名：**Sirius-Minecraft**（避免与其他 Sirius 重名项目撞车；内部文档沿用 Sirius 称谓）
 
 > 状态：探讨阶段（实时更新） · 最后更新：2026-08-18
-> 设计理念与动机见姐妹篇：[sirius-design.md](./sirius-design.md)
+> 设计理念与动机见姐妹篇：[sirius-design.md](../docs_human/sirius-design.md)（人读的纯思路版本）
 > 本文档面向实现：代码落点、接口定义、数据结构、参数与边界条件。
 
 ---

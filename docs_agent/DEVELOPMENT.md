@@ -1,7 +1,7 @@
 # Sirius 开发手册（DEVELOPMENT）
 
 > 给开发 agent 的操作手册：环境怎么搭、命令怎么跑、流程怎么走、门禁怎么过。
-> 设计原理不在本文（见 [sirius-design.md](./sirius-design.md)），接口规格不在本文（见 [sirius-technical.md](./sirius-technical.md)）。
+> 设计原理不在本文（见 [docs_human/sirius-design.md](../docs_human/sirius-design.md)，人读纯思路版），接口规格不在本文（见 [sirius-technical.md](./sirius-technical.md)）。
 > 最后更新：2026-08-18（文档基建轮）
 
 ## 1. 项目 30 秒

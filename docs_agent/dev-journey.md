@@ -1,7 +1,7 @@
 # Sirius 开发旅程（dev-journey）
 
 > 按时间回答"为什么走到今天这一步"。每条只写有据可查的事实，来源标注在括号内。
-> 状态类信息（做到哪了）看 [PROGRESS.md](./PROGRESS.md)；设计原理看 [sirius-design.md](./sirius-design.md)。
+> 状态类信息（做到哪了）看 [PROGRESS.md](./PROGRESS.md)；设计原理看 [sirius-design.md](../docs_human/sirius-design.md)。
 > 最后更新：2026-08-18（文档基建轮）
 
 ## 前传：为什么不直接用 Mindcraft CE

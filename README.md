@@ -19,7 +19,7 @@ sirius-brain（Python 大脑）══ WebSocket ══▶ sirius-bridge（NeoFor
 ## 快速了解
 
 - 5 分钟掌握全貌 → [`docs_human/overall.md`](./docs_human/overall.md)
-- 为什么这样设计 → [`docs_agent/sirius-design.md`](./docs_agent/sirius-design.md)
+- 为什么这样设计（纯思路，人读） → [`docs_human/sirius-design.md`](./docs_human/sirius-design.md)
 - 接口与协议规格 → [`docs_agent/sirius-technical.md`](./docs_agent/sirius-technical.md)
 - 开发环境与流程 → [`docs_agent/DEVELOPMENT.md`](./docs_agent/DEVELOPMENT.md)
 
