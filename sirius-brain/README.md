@@ -2,7 +2,7 @@
 
 Sirius（天狼星）Minecraft AI 陪玩项目的 Python 后端大脑。
 
-- 协议规格权威来源：`../sirius-technical.md` §8.2（Bridge Mod 协议）与 §5（任务卡/报告协议）
+- 协议规格权威来源：`../docs_agent/sirius-technical.md` §8.2（Bridge Mod 协议）与 §5（任务卡/报告协议）
 - 当前状态：M0 协议冻结 —— `sirius_brain/protocol/` 中的 pydantic v2 模型定义全部协议帧
 
 ## 包结构
@@ -62,7 +62,7 @@ Java 侧消费建议：
   - networknt：`JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)` 完整支持
   - everit-org/json-schema：未知方言 URI 被忽略，按 draft-7 语义校验（`prefixItems` 视为未知关键字，校验偏宽但不报错）
 - 依赖驱动：`tests/test_schema_export.py` 会对比仓库内 `schema/` 与代码重导出结果，改了 pydantic 模型忘了重导出会直接红
-- NEKO 兼容帧（`task`/`task_finished`）与自研 MCP 语义帧的完整映射见 [`../docs_for_agents/protocol-neko-mapping.md`](../docs_for_agents/protocol-neko-mapping.md)
+- NEKO 兼容帧（`task`/`task_finished`）与自研 MCP 语义帧的完整映射见 [`../docs_agent/protocol-neko-mapping.md`](../docs_agent/protocol-neko-mapping.md)
 
 ## Mock Bridge 用法（假身体）
 

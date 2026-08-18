@@ -31,8 +31,8 @@
 
 ## 证据
 
-- `docs_for_agents/m1-evidence/m1e_screenshot.jpg`（标题屏）
-- `docs_for_agents/m1-evidence/m1e_ingame.jpg`（in-game）
+- `docs_agent/m1-evidence/m1e_screenshot.jpg`（标题屏）
+- `docs_agent/m1-evidence/m1e_ingame.jpg`（in-game）
 - 脚本：`m1e_acceptance.py` / `m1e_ingame.py`（可重复执行）
 
 ## 交接须知
