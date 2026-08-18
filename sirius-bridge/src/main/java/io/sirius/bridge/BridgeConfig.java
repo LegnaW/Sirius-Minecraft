@@ -11,8 +11,8 @@ import java.security.SecureRandom;
  *
  * <p>Deliberately a tiny hand-rolled TOML subset (flat {@code key = "value"} /
  * {@code key = 123} lines, {@code #} comments) instead of the NeoForge config
- * system: only two keys exist, and the token must be (re)generated and
- * persisted on first launch regardless of config UIs.
+ * system: only a handful of keys exist, and the token must be (re)generated
+ * and persisted on first launch regardless of config UIs.
  *
  * <p>On first launch a random token is generated, written to the file and
  * reported back so the caller can print it to the audit log.
@@ -20,19 +20,45 @@ import java.security.SecureRandom;
 public final class BridgeConfig {
 
     public static final int DEFAULT_PORT = 8765;
+    /** Default input injection rate limit (calls/s across all input.* tools; spec 8.2 ~20/s). */
+    public static final int DEFAULT_RATE_LIMIT_PER_SEC = 20;
+    /**
+     * Default for {@code keep_running_unfocused}: keep ticking when the game
+     * window loses focus by disabling vanilla's {@code pauseOnLostFocus} at
+     * runtime (the AI-plays-human-watches scenario dies without this).
+     */
+    public static final boolean DEFAULT_KEEP_RUNNING_UNFOCUSED = true;
 
     /** Resolved settings. */
     public final int port;
     public final String token;
     /** True when the token was freshly generated this launch (first run or token removed). */
     public final boolean tokenGenerated;
+    /** Master switch for the input.* tools (input_enabled). */
+    public final boolean inputEnabled;
+    /** Combined rate limit for all input.* calls per second (rate_limit_per_sec). */
+    public final int rateLimitPerSec;
+    /** Save an evidence screenshot before every GUI click (gui_click_evidence). */
+    public final boolean guiClickEvidence;
+    /**
+     * Disable vanilla's pause-on-lost-focus at runtime (keep_running_unfocused).
+     * When true the bridge sets {@code Options.pauseOnLostFocus = false} once
+     * at startup; the user's {@code options.txt} file is never written by us.
+     */
+    public final boolean keepRunningUnfocused;
     /** Human-readable notes gathered while loading (logged by the caller, never fatal). */
     public final String notes;
 
-    private BridgeConfig(int port, String token, boolean tokenGenerated, String notes) {
+    private BridgeConfig(int port, String token, boolean tokenGenerated,
+                         boolean inputEnabled, int rateLimitPerSec, boolean guiClickEvidence,
+                         boolean keepRunningUnfocused, String notes) {
         this.port = port;
         this.token = token;
         this.tokenGenerated = tokenGenerated;
+        this.inputEnabled = inputEnabled;
+        this.rateLimitPerSec = rateLimitPerSec;
+        this.guiClickEvidence = guiClickEvidence;
+        this.keepRunningUnfocused = keepRunningUnfocused;
         this.notes = notes;
     }
 
@@ -43,6 +69,10 @@ public final class BridgeConfig {
     public static BridgeConfig load(Path file, SecureRandom random) {
         int port = DEFAULT_PORT;
         String token = null;
+        boolean inputEnabled = true;
+        int rateLimitPerSec = DEFAULT_RATE_LIMIT_PER_SEC;
+        boolean guiClickEvidence = true;
+        boolean keepRunningUnfocused = DEFAULT_KEEP_RUNNING_UNFOCUSED;
         StringBuilder notes = new StringBuilder();
 
         if (Files.exists(file)) {
@@ -76,6 +106,45 @@ public final class BridgeConfig {
                                 token = value;
                             }
                         }
+                        // M2-A input keys - appended, existing keys keep their meaning.
+                        case "input_enabled" -> {
+                            Boolean parsed = parseBoolean(value);
+                            if (parsed != null) {
+                                inputEnabled = parsed;
+                            } else {
+                                notes.append("input_enabled not true/false: ").append(value).append("; ");
+                            }
+                        }
+                        case "rate_limit_per_sec" -> {
+                            try {
+                                int parsed = Integer.parseInt(value);
+                                if (parsed >= 1 && parsed <= 1000) {
+                                    rateLimitPerSec = parsed;
+                                } else {
+                                    notes.append("rate_limit_per_sec out of range 1..1000: ").append(value)
+                                            .append(", using ").append(DEFAULT_RATE_LIMIT_PER_SEC).append("; ");
+                                }
+                            } catch (NumberFormatException e) {
+                                notes.append("rate_limit_per_sec not a number: ").append(value).append("; ");
+                            }
+                        }
+                        case "gui_click_evidence" -> {
+                            Boolean parsed = parseBoolean(value);
+                            if (parsed != null) {
+                                guiClickEvidence = parsed;
+                            } else {
+                                notes.append("gui_click_evidence not true/false: ").append(value).append("; ");
+                            }
+                        }
+                        // M2-A2 focus key - appended, existing keys keep their meaning.
+                        case "keep_running_unfocused" -> {
+                            Boolean parsed = parseBoolean(value);
+                            if (parsed != null) {
+                                keepRunningUnfocused = parsed;
+                            } else {
+                                notes.append("keep_running_unfocused not true/false: ").append(value).append("; ");
+                            }
+                        }
                         default -> {
                         }
                     }
@@ -94,7 +163,8 @@ public final class BridgeConfig {
             notes.append("token generated; ");
         }
 
-        BridgeConfig config = new BridgeConfig(port, token, generated, notes.toString().trim());
+        BridgeConfig config = new BridgeConfig(port, token, generated,
+                inputEnabled, rateLimitPerSec, guiClickEvidence, keepRunningUnfocused, notes.toString().trim());
         config.save(file);
         return config;
     }
@@ -109,9 +179,28 @@ public final class BridgeConfig {
                 # token: shared secret for the hello handshake. To rotate it, delete
                 #        the line (or set token = "") and restart the game; the new
                 #        token is printed to logs/sirius_bridge.log on startup.
+                # input_enabled     : master switch for the input.* injection tools
+                #                     (default true). When false they answer -32011.
+                # rate_limit_per_sec: combined calls/s budget for all input.* tools
+                #                     (token bucket; default 20, range 1..1000).
+                #                     Over-rate calls answer -32010 rate_limited.
+                # gui_click_evidence: when true, every input.click while a GUI screen
+                #                     is open first saves a small JPEG screenshot to
+                #                     logs/sirius_evidence/ (default true).
+                # keep_running_unfocused: when true (default), the bridge disables
+                #                     vanilla's "Pause On Lost Focus" ONCE at startup
+                #                     (runtime Options.pauseOnLostFocus=false) so the
+                #                     world keeps ticking while the window is
+                #                     unfocused. options.txt is never written by the
+                #                     bridge; to make it permanent manually add
+                #                     "pauseOnLostFocus:false" there instead.
                 port = %d
                 token = "%s"
-                """.formatted(port, token);
+                input_enabled = %s
+                rate_limit_per_sec = %d
+                gui_click_evidence = %s
+                keep_running_unfocused = %s
+                """.formatted(port, token, inputEnabled, rateLimitPerSec, guiClickEvidence, keepRunningUnfocused);
         try {
             Files.createDirectories(file.getParent());
             Files.writeString(file, content, StandardCharsets.UTF_8);
@@ -139,5 +228,16 @@ public final class BridgeConfig {
             return value.substring(1, value.length() - 1);
         }
         return value;
+    }
+
+    /** Parses "true"/"false" (any case); null when the value is neither. */
+    private static Boolean parseBoolean(String value) {
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        return null;
     }
 }

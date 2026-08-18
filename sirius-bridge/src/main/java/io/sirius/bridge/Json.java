@@ -33,6 +33,10 @@ public final class Json {
     public static final int INTERNAL_ERROR = -32603;
     /** Implementation-defined server error segment (-32000..-32099), used for auth failures. */
     public static final int AUTH_FAILED = -32000;
+    /** Input tool over the configured rate limit (M2-A; see config rate_limit_per_sec). */
+    public static final int RATE_LIMITED = -32010;
+    /** Input tools disabled via config (input_enabled = false). */
+    public static final int INPUT_DISABLED = -32011;
 
     private Json() {
     }

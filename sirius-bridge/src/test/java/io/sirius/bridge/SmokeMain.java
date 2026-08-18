@@ -8,17 +8,22 @@ import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
 /**
- * In-process smoke test for the M1-C perception tools (run via
- * {@code gradlew smokeTest}). No game, no client: it exercises the pure
- * halves - parameter validation, bbox cropping, the JPEG budget ladder,
- * response assembly, block scanning and entity filtering - exactly the logic
- * that would otherwise only be verifiable inside a running Minecraft.
+ * In-process smoke test for the M1-C perception tools and the M2-A pure
+ * input logic (run via {@code gradlew smokeTest}). No game, no client: it
+ * exercises the pure halves - parameter validation, bbox cropping, the JPEG
+ * budget ladder, response assembly, block scanning and entity filtering,
+ * plus the key-name -> GLFW keycode table, the rate-limiter token bucket,
+ * input param validation and evidence file naming - exactly the logic that
+ * would otherwise only be verifiable inside a running Minecraft.
  *
  * <p>Exit code 0 = all checks passed; any failure prints the check name and
  * exits 1.
@@ -33,6 +38,11 @@ public final class SmokeMain {
         worldQueryParams();
         imageOps();
         contracts();
+        keyCodes();
+        tokenBucket();
+        inputContracts();
+        evidenceNaming();
+        bridgeConfig();
 
         System.out.println();
         System.out.println("smoke: " + passed + " passed, " + failures.size() + " failed");
@@ -44,6 +54,263 @@ public final class SmokeMain {
     }
 
     // ------------------------------------------------------------------ checks
+
+    private static void keyCodes() throws Exception {
+        // --- letters/digits, case-insensitive
+        check(KeyCodes.resolve("E") == 69 && KeyCodes.resolve("e") == 69 && KeyCodes.resolve("W") == 87,
+                "keycodes: letters E/W resolve to GLFW 69/87");
+        check(KeyCodes.resolve("0") == 48 && KeyCodes.resolve("9") == 57, "keycodes: digits 0/9 resolve");
+        // --- common control keys and aliases
+        check(KeyCodes.resolve("ENTER") == 257 && KeyCodes.resolve("RETURN") == 257,
+                "keycodes: ENTER/RETURN -> 257");
+        check(KeyCodes.resolve("ESC") == 256 && KeyCodes.resolve("ESCAPE") == 256, "keycodes: ESC -> 256");
+        check(KeyCodes.resolve("SPACE") == 32, "keycodes: SPACE -> 32");
+        check(KeyCodes.resolve("TAB") == 258 && KeyCodes.resolve("BACKSPACE") == 259,
+                "keycodes: TAB/BACKSPACE -> 258/259");
+        check(KeyCodes.resolve("F1") == 290 && KeyCodes.resolve("F3") == 292 && KeyCodes.resolve("F12") == 301,
+                "keycodes: F1/F3/F12 -> 290/292/301");
+        check(KeyCodes.resolve("SHIFT") == 340 && KeyCodes.resolve("LSHIFT") == 340
+                && KeyCodes.resolve("LEFT_SHIFT") == 340 && KeyCodes.resolve("RSHIFT") == 344,
+                "keycodes: SHIFT aliases -> 340/344");
+        check(KeyCodes.resolve("CTRL") == 341 && KeyCodes.resolve("CONTROL") == 341
+                && KeyCodes.resolve("RCTRL") == 345 && KeyCodes.resolve("ALT") == 342,
+                "keycodes: CTRL/ALT aliases -> 341/345/342");
+        check(KeyCodes.resolve("UP") == 265 && KeyCodes.resolve("DOWN") == 264
+                && KeyCodes.resolve("LEFT") == 263 && KeyCodes.resolve("RIGHT") == 262,
+                "keycodes: arrows -> 262..265");
+        check(KeyCodes.resolve("PAGEUP") == 266 && KeyCodes.resolve("PAGE_DOWN") == 267
+                && KeyCodes.resolve("HOME") == 268 && KeyCodes.resolve("END") == 269,
+                "keycodes: PAGE_UP/HOME/END");
+        check(KeyCodes.resolve("NUMPAD5") == 325 && KeyCodes.resolve("KPENTER") == 335,
+                "keycodes: numpad keys");
+        check(KeyCodes.resolve("GRAVE") == 96 && KeyCodes.resolve("SLASH") == 47,
+                "keycodes: punctuation keys");
+        // --- unknown / empty names rejected
+        expectInvalid(() -> KeyCodes.resolve("NOPE"), "keycodes: unknown name rejected");
+        expectInvalid(() -> KeyCodes.resolve(""), "keycodes: empty name rejected");
+        expectInvalid(() -> KeyCodes.resolve("  "), "keycodes: blank name rejected");
+        // --- reverse lookup
+        check("E".equals(KeyCodes.name(69)) && "ENTER".equals(KeyCodes.name(257))
+                && "SHIFT".equals(KeyCodes.name(340)),
+                "keycodes: canonical reverse names");
+        check(KeyCodes.name(292) != null && KeyCodes.name(31) == null,
+                "keycodes: reverse lookup misses unknown codes");
+        // --- integer keycode validity range
+        check(KeyCodes.isValidKeycode(32) && KeyCodes.isValidKeycode(348) && !KeyCodes.isValidKeycode(31)
+                && !KeyCodes.isValidKeycode(349) && !KeyCodes.isValidKeycode(-1),
+                "keycodes: keycode range 32..348 enforced");
+    }
+
+    private static void tokenBucket() {
+        // Deterministic clock: 1 tick = 1 ms.
+        long[] nanos = {0};
+        TokenBucket bucket = new TokenBucket(20, () -> nanos[0]);
+
+        boolean[] results = new boolean[25];
+        for (int i = 0; i < results.length; i++) {
+            results[i] = bucket.tryAcquire(1);
+        }
+        boolean first20 = true;
+        for (int i = 0; i < 20; i++) {
+            first20 &= results[i];
+        }
+        check(first20 && !results[20] && !results[21],
+                "bucket: burst of 20 passes, 21st/22nd rejected");
+
+        nanos[0] += 50_000_000L; // +50ms -> exactly 1 token refilled
+        check(bucket.tryAcquire(1) && !bucket.tryAcquire(1),
+                "bucket: 50ms at 20/s refills exactly one token");
+
+        nanos[0] += 2_000_000_000L; // +2s idle -> capped at capacity
+        double available = bucket.availableTokens();
+        check(available <= 20.0 && bucket.tryAcquire(20) && !bucket.tryAcquire(1),
+                "bucket: idle 2s refills to capacity cap (20)");
+        check(bucket.tryAcquire(0), "bucket: zero-token acquire succeeds");
+        check(bucket.refillPerSecond() == 20, "bucket: rate exposed");
+    }
+
+    private static void inputContracts() throws Exception {
+        // --- input.key
+        InputContracts.KeyParams k = validParams(() -> InputContracts.keyParams(json("{\"code\":\"E\"}")));
+        check(k.glfwKey() == 69 && "E".equals(k.keyName()) && k.durationMs() == 0 && k.modifiers() == 0,
+                "input.key: name code with defaults");
+
+        k = validParams(() -> InputContracts.keyParams(
+                json("{\"code\":\"LEFT_SHIFT\",\"duration_ms\":500,\"modifiers\":[\"CTRL\"]}")));
+        check(k.glfwKey() == 340 && k.durationMs() == 500 && k.modifiers() == InputContracts.MOD_CONTROL,
+                "input.key: duration + single modifier parsed");
+
+        k = validParams(() -> InputContracts.keyParams(
+                json("{\"code\":257,\"modifiers\":[\"SHIFT\",\"CTRL\",\"ALT\",\"SUPER\"]}")));
+        check(k.glfwKey() == 257 && k.modifiers() == 0xF,
+                "input.key: integer code + all modifiers -> bits 0xF");
+
+        k = validParams(() -> InputContracts.keyParams(json("{\"code\":69.0}")));
+        check(k.glfwKey() == 69, "input.key: whole-number float code accepted");
+
+        expectInvalid(() -> InputContracts.keyParams(json("{}")), "input.key: missing code rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":\"NOPE\"}")),
+                "input.key: unknown name rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":1000}")),
+                "input.key: out-of-range keycode rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":69.5}")),
+                "input.key: fractional keycode rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":[69]}")),
+                "input.key: array code rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":\"E\",\"duration_ms\":-1}")),
+                "input.key: negative duration rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":\"E\",\"duration_ms\":61000}")),
+                "input.key: duration over cap rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":\"E\",\"duration_ms\":80.5}")),
+                "input.key: fractional duration rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":\"E\",\"modifiers\":\"SHIFT\"}")),
+                "input.key: non-array modifiers rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":\"E\",\"modifiers\":[\"HYPER\"]}")),
+                "input.key: unknown modifier rejected");
+        expectInvalid(() -> InputContracts.keyParams(json("{\"code\":\"E\",\"modifiers\":[3]}")),
+                "input.key: numeric modifier entry rejected");
+
+        // --- input.text
+        InputContracts.TextParams t = validParams(() -> InputContracts.textParams(json("{\"string\":\"hi 你好\"}")));
+        check("hi 你好".equals(t.text()) && t.codepoints() == 5, "input.text: unicode string parsed");
+
+        t = validParams(() -> InputContracts.textParams(json("{\"string\":\"\\ud83d\\ude00\"}")));
+        check(t.codepoints() == 1, "input.text: surrogate pair counts as one codepoint");
+
+        expectInvalid(() -> InputContracts.textParams(json("{}")), "input.text: missing string rejected");
+        expectInvalid(() -> InputContracts.textParams(json("{\"string\":\"\"}")),
+                "input.text: empty string rejected");
+        expectInvalid(() -> InputContracts.textParams(json("{\"string\":42}")),
+                "input.text: non-string rejected");
+        StringBuilder longText = new StringBuilder();
+        for (int i = 0; i <= InputContracts.MAX_TEXT_CODEPOINTS; i++) {
+            longText.append('x');
+        }
+        final String tooLong = longText.toString();
+        expectInvalid(() -> InputContracts.textParams(json("{\"string\":\"" + tooLong + "\"}")),
+                "input.text: over-length string rejected");
+
+        // --- input.mouseMove
+        InputContracts.MouseMoveParams m = validParams(() -> InputContracts.mouseMoveParams(
+                json("{\"x\":100,\"y\":200.5}")));
+        check(m.x() == 100.0 && m.y() == 200.5, "input.mouseMove: numeric pair parsed");
+        expectInvalid(() -> InputContracts.mouseMoveParams(json("{\"x\":100}")),
+                "input.mouseMove: missing y rejected");
+        expectInvalid(() -> InputContracts.mouseMoveParams(json("{\"x\":\"100\",\"y\":200}")),
+                "input.mouseMove: string coordinate rejected");
+
+        // --- input.click
+        InputContracts.ClickParams c = validParams(() -> InputContracts.clickParams(json("{\"button\":0}")));
+        check(c.button() == 0 && c.count() == 1, "input.click: defaults (count 1)");
+        c = validParams(() -> InputContracts.clickParams(json("{\"button\":2,\"count\":3}")));
+        check(c.button() == 2 && c.count() == 3, "input.click: button/count parsed");
+        expectInvalid(() -> InputContracts.clickParams(json("{}")), "input.click: missing button rejected");
+        expectInvalid(() -> InputContracts.clickParams(json("{\"button\":3}")),
+                "input.click: button 3 rejected");
+        expectInvalid(() -> InputContracts.clickParams(json("{\"button\":-1}")),
+                "input.click: negative button rejected");
+        expectInvalid(() -> InputContracts.clickParams(json("{\"button\":0,\"count\":0}")),
+                "input.click: count 0 rejected");
+        expectInvalid(() -> InputContracts.clickParams(
+                json("{\"button\":0,\"count\":" + (InputContracts.MAX_CLICK_COUNT + 1) + "}")),
+                "input.click: count over cap rejected");
+        expectInvalid(() -> InputContracts.clickParams(json("{\"button\":0.5}")),
+                "input.click: fractional button rejected");
+
+        // --- result shapes
+        JsonObject keyResult = InputContracts.keyResult("E", 69, 50, 1, true);
+        check(keyResult.get("injected").getAsBoolean() && "E".equals(keyResult.get("key").getAsString())
+                && keyResult.get("glfw_key").getAsInt() == 69 && keyResult.get("duration_ms").getAsInt() == 50,
+                "input results: keyResult shape");
+
+        JsonObject textResult = InputContracts.textResult(3, 3, true);
+        check(textResult.get("delivered").getAsInt() == 3 && textResult.get("screen_open").getAsBoolean(),
+                "input results: textResult shape");
+
+        JsonObject moveResult = InputContracts.mouseMoveResult(100, 200, 50, 100, false);
+        check(moveResult.get("moved").getAsBoolean() && moveResult.get("gui_scaled").getAsJsonObject()
+                        .get("x").getAsDouble() == 50,
+                "input results: mouseMoveResult shape");
+
+        JsonObject clickResult = InputContracts.clickResult(0, 2, true, "InventoryScreen",
+                "evidence_click_20260818_120000000.jpg", 12345);
+        check(clickResult.get("clicked").getAsBoolean()
+                && "InventoryScreen".equals(clickResult.get("screen").getAsString())
+                && clickResult.get("evidence").getAsJsonObject().get("bytes").getAsLong() == 12345,
+                "input results: clickResult shape with evidence");
+
+        JsonObject clickNoEvidence = InputContracts.clickResult(1, 1, false, null, null, 0);
+        check(!clickNoEvidence.has("screen") && !clickNoEvidence.has("evidence"),
+                "input results: clickResult omits null fields");
+
+        check(InputContracts.rateLimitedMessage(20).contains("20"),
+                "input results: rate-limited message mentions the limit");
+    }
+
+    private static void evidenceNaming() {
+        long epochMs = 1755470400123L; // 2025-08-18 (local) ish - exact value irrelevant
+        String name = InputContracts.evidenceFileName("click", epochMs);
+        check(name.startsWith("evidence_click_") && name.endsWith(".jpg"),
+                "evidence: name has prefix and .jpg suffix");
+        check(name.matches("evidence_click_\\d{8}_\\d{9}\\.jpg"),
+                "evidence: name matches timestamp pattern yyyyMMdd_HHmmssSSS");
+        check(name.chars().allMatch(ch -> Character.isLetterOrDigit(ch) || ch == '_' || ch == '.'),
+                "evidence: filesystem-safe characters only");
+        check(!InputContracts.evidenceFileName("click", epochMs + 1).equals(name),
+                "evidence: names differ across milliseconds");
+    }
+
+    private static void bridgeConfig() throws Exception {
+        Path dir = Files.createTempDirectory("sirius_smoke_config");
+
+        // --- fresh file: focus key defaults to true, file gains the new key
+        Path fresh = dir.resolve("fresh.toml");
+        BridgeConfig c = BridgeConfig.load(fresh, new SecureRandom());
+        check(c.keepRunningUnfocused == BridgeConfig.DEFAULT_KEEP_RUNNING_UNFOCUSED,
+                "config: keep_running_unfocused defaults to " + BridgeConfig.DEFAULT_KEEP_RUNNING_UNFOCUSED);
+        String saved = Files.readString(fresh);
+        check(saved.contains("keep_running_unfocused = true"),
+                "config: fresh save writes keep_running_unfocused = true");
+        check(saved.contains("rate_limit_per_sec = 20") && saved.contains("gui_click_evidence = true")
+                        && saved.contains("input_enabled = true") && saved.contains("port = 8765"),
+                "config: fresh save keeps the M2-A keys with their defaults");
+
+        // --- explicit false round-trips through save + reload
+        Path offFile = dir.resolve("off.toml");
+        Files.writeString(offFile, """
+                port = 9000
+                token = "smoketoken"
+                input_enabled = false
+                keep_running_unfocused = false
+                """);
+        BridgeConfig off = BridgeConfig.load(offFile, new SecureRandom());
+        check(!off.keepRunningUnfocused && !off.inputEnabled && off.port == 9000
+                        && "smoketoken".equals(off.token) && !off.tokenGenerated,
+                "config: keep_running_unfocused=false parsed alongside M2-A keys");
+        check(Files.readString(offFile).contains("keep_running_unfocused = false")
+                        && Files.readString(offFile).contains("rate_limit_per_sec = 20"),
+                "config: save rewrites false value and keeps other keys");
+
+        // --- case-insensitive booleans
+        Path caseFile = dir.resolve("case.toml");
+        Files.writeString(caseFile, "token = \"t\"\nkeep_running_unfocused = FALSE\n");
+        check(!BridgeConfig.load(caseFile, new SecureRandom()).keepRunningUnfocused,
+                "config: FALSE (any case) parses as false");
+
+        // --- invalid value degrades to the default + a note, never fatal
+        Path badFile = dir.resolve("bad.toml");
+        Files.writeString(badFile, "token = \"t\"\nkeep_running_unfocused = maybe\n");
+        BridgeConfig bad = BridgeConfig.load(badFile, new SecureRandom());
+        check(bad.keepRunningUnfocused == BridgeConfig.DEFAULT_KEEP_RUNNING_UNFOCUSED
+                        && bad.notes.contains("keep_running_unfocused"),
+                "config: invalid value falls back to default with a note");
+
+        // --- unknown keys are still ignored (forward compatibility)
+        Path extraFile = dir.resolve("extra.toml");
+        Files.writeString(extraFile, "token = \"t\"\nsome_future_key = 42\nkeep_running_unfocused = false\n");
+        check(!BridgeConfig.load(extraFile, new SecureRandom()).keepRunningUnfocused,
+                "config: unknown keys ignored, focus key still parsed");
+    }
 
     private static void screenshotParams() throws Exception {
         ToolContracts.ScreenshotParams p;

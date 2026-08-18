@@ -1,6 +1,7 @@
 package io.sirius.bridge;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.Options;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.fml.loading.FMLPaths;
@@ -78,6 +79,7 @@ public class SiriusBridge {
             if (!config.notes.isEmpty()) {
                 LOGGER.info("sirius-bridge: config: {}", config.notes);
             }
+            applyFocusPolicy(config);
             AuditLog audit = AuditLog.create(gameDir);
             server = new BridgeServer(config, audit);
             server.startAsync();
@@ -85,6 +87,44 @@ public class SiriusBridge {
                     + "or logs/sirius_bridge.log)", config.port);
         } catch (Exception e) {
             LOGGER.error("sirius-bridge: failed to start the WebSocket server", e);
+        }
+    }
+
+    /**
+     * M2-A2: with {@code keep_running_unfocused = true} (the default), the
+     * world keeps ticking while the game window is unfocused - the human
+     * "switches to a terminal/browser and the bot's world must not stop"
+     * scenario.
+     *
+     * <p>Mechanics (verified against the 1.21.1 decompiled sources): vanilla
+     * pauses 500 ms after focus loss because {@code GameRenderer.render}
+     * calls {@code pauseGame(false)} when {@code !isWindowActive() &&
+     * options.pauseOnLostFocus}; the opened {@code PauseScreen} is what
+     * freezes singleplayer ticks. {@code pauseOnLostFocus} is a plain
+     * {@code public boolean} field on {@code Options} (NOT an
+     * {@code OptionInstance} in 1.21.1), so the whole runtime API is a field
+     * write. F3+P proves this is a supported runtime toggle (it flips the
+     * field the same way, plus {@code options.save()}).
+     *
+     * <p>We deliberately do NOT call {@code options.save()}: the user's
+     * {@code options.txt} is never written by the bridge. Caveat (documented
+     * in the README): if the user later saves options themselves (any change
+     * in the vanilla settings screen, or F3+P), vanilla persists ALL fields
+     * including our runtime {@code false}. That is vanilla behaviour, not a
+     * bridge write; setting {@code keep_running_unfocused = false} stops the
+     * bridge from touching the field at all.
+     */
+    private void applyFocusPolicy(BridgeConfig config) {
+        if (!config.keepRunningUnfocused) {
+            return;
+        }
+        try {
+            Options options = Minecraft.getInstance().options;
+            options.pauseOnLostFocus = false;
+            LOGGER.info("sirius-bridge: keep_running_unfocused=true -> vanilla pauseOnLostFocus disabled"
+                    + " (runtime only, options.txt untouched); view rotation still needs a focused window");
+        } catch (Throwable t) {
+            LOGGER.warn("sirius-bridge: could not disable pauseOnLostFocus: {}", t.toString());
         }
     }
 

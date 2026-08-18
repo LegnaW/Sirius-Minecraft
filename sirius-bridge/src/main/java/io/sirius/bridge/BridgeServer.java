@@ -91,10 +91,12 @@ public final class BridgeServer extends WebSocketServer {
         this.audit = audit;
         setReuseAddr(true);
         // Built-in tool implementations. M1-C adds screenshot/getStats/world.query
-        // (and later input.*) by registering handlers here - dispatcher untouched.
+        // and M2-A the input.* primitives by registering handlers here - dispatcher
+        // untouched.
         tools.register("capabilities/list", (ctx, params) ->
                 Json.capabilitiesResponse(ctx.id(), Capabilities.list(), Capabilities.PROTOCOL_VERSION));
         PerceptionTools.registerAll(tools);
+        InputTools.registerAll(tools, config);
     }
 
     AuditLog audit() {
@@ -120,6 +122,7 @@ public final class BridgeServer extends WebSocketServer {
             }
         }
         scheduler.shutdownNow();
+        InputTools.shutdown();
         try {
             this.stop(1000);
         } catch (InterruptedException e) {

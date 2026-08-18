@@ -105,8 +105,9 @@ final class PerceptionTools {
     /**
      * Reads the main framebuffer. MUST run on the render thread (it binds the
      * colour texture and downloads it); call via {@link #callOnMainThread}.
+     * Package-private: InputTools reuses it for GUI-click evidence shots.
      */
-    private static BufferedImage grabScreen() {
+    static BufferedImage grabScreen() {
         RenderTarget target = Minecraft.getInstance().getMainRenderTarget();
         NativeImage shot = Screenshot.takeScreenshot(target); // world + hand + GUI, as on screen
         try {
