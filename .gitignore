@@ -34,5 +34,5 @@ Thumbs.db
 .hmcl/
 HMCL-*.exe
 
-# Per-developer local environment paths (see docs_agent/ENV.template.md)
-ENV.local.md
+# Per-developer local notes: paths + machine quirks + personal prefs (see docs_agent/local.template.md)
+local.md
