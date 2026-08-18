@@ -251,8 +251,12 @@ final class PerceptionTools {
      * WS thread for its result. Times out (iconified window / shutdown)
      * instead of hanging; a failure inside the task propagates to the caller
      * (the dispatcher turns it into {@code -32603}).
+     *
+     * <p>Package-private: the M2-C {@link GuiTools} reuses this latch - the
+     * only change from its former {@code private} visibility (M2-A chose a
+     * local copy back then; new tools should prefer this shared one).
      */
-    private static <T> T callOnMainThread(ToolContext ctx, Supplier<T> supplier) throws Exception {
+    static <T> T callOnMainThread(ToolContext ctx, Supplier<T> supplier) throws Exception {
         CountDownLatch done = new CountDownLatch(1);
         Object[] box = new Object[2]; // [0] result, [1] failure
         ctx.onMainThread(() -> {

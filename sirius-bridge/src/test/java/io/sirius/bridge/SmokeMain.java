@@ -19,14 +19,16 @@ import java.util.Random;
 
 /**
  * In-process smoke test for the M1-C perception tools, the M2-A pure input
- * logic and the M2-B event push channel (run via {@code gradlew smokeTest}).
- * No game, no client: it exercises the pure halves - parameter validation,
- * bbox cropping, the JPEG budget ladders, response assembly, block scanning
- * and entity filtering, the key-name -> GLFW keycode table, the rate-limiter
- * token bucket, input param validation and evidence file naming, plus event
- * subscription matching, notification frame assembly, the screenshot stream
- * throttle state machine and the streaming budget ladder - exactly the logic
- * that would otherwise only be verifiable inside a running Minecraft.
+ * logic, the M2-B event push channel and the M2-C GUI state tool (run via
+ * {@code gradlew smokeTest}). No game, no client: it exercises the pure
+ * halves - parameter validation, bbox cropping, the JPEG budget ladders,
+ * response assembly, block scanning and entity filtering, the key-name ->
+ * GLFW keycode table, the rate-limiter token bucket, input param validation
+ * and evidence file naming, event subscription matching, notification frame
+ * assembly, the screenshot stream throttle state machine and the streaming
+ * budget ladder, plus widget/slot node assembly, the node cap + truncation
+ * and all three getGuiState response shapes - exactly the logic that would
+ * otherwise only be verifiable inside a running Minecraft.
  *
  * <p>Exit code 0 = all checks passed; any failure prints the check name and
  * exits 1.
@@ -49,6 +51,7 @@ public final class SmokeMain {
         eventsContracts();
         streamThrottle();
         streamLadder();
+        guiContracts();
 
         System.out.println();
         System.out.println("smoke: " + passed + " passed, " + failures.size() + " failed");
@@ -752,6 +755,112 @@ public final class SmokeMain {
         }
         check(ring.size() == EventsContracts.STREAM_RING_SIZE && ring.peekFirst() == 3 && ring.peekLast() == 5,
                 "events: ring buffer keeps the 3 newest frames, oldest evicted");
+    }
+
+    // ------------------------------------------------------------------ M2-C: gui state
+
+    private static void guiContracts() throws Exception {
+        // --- params: frozen schema declares an empty object
+        GuiContracts.guiStateParams(json("{}"));
+        check(true, "gui: empty params accepted");
+        expectInvalid(() -> {
+            GuiContracts.guiStateParams(json("{\"tier\":\"full\"}"));
+            return null;
+        }, "gui: non-empty params rejected");
+
+        // --- collector cap + truncation (world.query discipline)
+        GuiContracts.WidgetCollector small = new GuiContracts.WidgetCollector();
+        small.add(new GuiContracts.WidgetNode("Button", 1, 2, 3, 4, true, true, "OK", null));
+        check(small.nodes().size() == 1 && !small.truncated() && !small.full(),
+                "gui: collector accepts nodes below the cap");
+        GuiContracts.WidgetCollector full = new GuiContracts.WidgetCollector();
+        for (int i = 0; i < GuiContracts.WIDGETS_CAP + 5; i++) {
+            full.add(new GuiContracts.WidgetNode("W" + i, 0, 0, 1, 1, true, true, null, null));
+        }
+        check(full.nodes().size() == GuiContracts.WIDGETS_CAP && full.truncated() && full.full(),
+                "gui: collector stops at " + GuiContracts.WIDGETS_CAP + " and flags truncated");
+
+        // --- widget node JSON: fields, empty message omitted, EditBox text kept
+        GuiContracts.WidgetCollector widgets = new GuiContracts.WidgetCollector();
+        widgets.add(new GuiContracts.WidgetNode("Button", 10, 20, 200, 20, true, false, "Done", null));
+        widgets.add(new GuiContracts.WidgetNode("EditBox", 5, 6, 100, 16, true, true, "", "hello"));
+        widgets.add(new GuiContracts.WidgetNode("Image", 0, 0, 16, 16, false, true, null, null));
+        JsonObject standard = GuiContracts.guiStateResult(true, "ChatScreen", widgets, null);
+        JsonObject first = standard.get("widgets").getAsJsonArray().get(0).getAsJsonObject();
+        check("Button".equals(first.get("type").getAsString())
+                        && first.get("x").getAsInt() == 10 && first.get("y").getAsInt() == 20
+                        && first.get("width").getAsInt() == 200 && first.get("height").getAsInt() == 20
+                        && first.get("visible").getAsBoolean() && !first.get("active").getAsBoolean()
+                        && "Done".equals(first.get("message").getAsString()),
+                "gui: widget node carries type/geometry/flags/message");
+        JsonObject second = standard.get("widgets").getAsJsonArray().get(1).getAsJsonObject();
+        check(!second.has("message") && "hello".equals(second.get("text").getAsString()),
+                "gui: empty message omitted, EditBox text included");
+        JsonObject third = standard.get("widgets").getAsJsonArray().get(2).getAsJsonObject();
+        check(!third.has("message") && !third.has("text") && !third.get("visible").getAsBoolean(),
+                "gui: null message/text omitted, invisible widget still reported");
+
+        // --- standard response shape (non-container: no slots field)
+        check(standard.get("screen_open").getAsBoolean() && standard.get("in_game").getAsBoolean()
+                        && "ChatScreen".equals(standard.get("screen_class").getAsString())
+                        && !standard.has("slots") && !standard.get("truncated").getAsBoolean(),
+                "gui: standard result shape, slots omitted for non-container screens");
+
+        // --- container response shape + slot JSON (item null vs name, note)
+        GuiContracts.WidgetCollector empty = new GuiContracts.WidgetCollector();
+        List<GuiContracts.SlotFact> slots = List.of(
+                new GuiContracts.SlotFact(0, 100, 20, GuiContracts.ROLE_RESULT, "minecraft:oak_log", 12, null),
+                new GuiContracts.SlotFact(9, 30, 40, GuiContracts.ROLE_PLAYER, null, 0, null),
+                new GuiContracts.SlotFact(40, 77, 62, GuiContracts.ROLE_CONTAINER, null, 0,
+                        "item access failed: boom"));
+        JsonObject container = GuiContracts.guiStateResult(true, "InventoryScreen", empty, slots);
+        check(container.has("slots") && container.get("widgets").getAsJsonArray().size() == 0,
+                "gui: container result carries slots and can have zero widgets");
+        JsonObject slot0 = container.get("slots").getAsJsonArray().get(0).getAsJsonObject();
+        check(slot0.get("index").getAsInt() == 0 && slot0.get("x").getAsInt() == 100
+                        && slot0.get("y").getAsInt() == 20
+                        && "minecraft:oak_log".equals(slot0.get("item").getAsString())
+                        && slot0.get("count").getAsInt() == 12 && !slot0.has("note"),
+                "gui: slot entry fields (index/x/y/role/item/count), note omitted when fine");
+        JsonObject slot1 = container.get("slots").getAsJsonArray().get(1).getAsJsonObject();
+        check(slot1.get("item").isJsonNull() && slot1.get("count").getAsInt() == 0,
+                "gui: empty slot reports item:null count:0");
+        JsonObject slot2 = container.get("slots").getAsJsonArray().get(2).getAsJsonObject();
+        check(slot2.get("item").isJsonNull() && slot2.get("note").getAsString().contains("boom"),
+                "gui: broken slot degrades to item:null + note");
+
+        // --- no-screen shape
+        JsonObject none = GuiContracts.noScreenResult();
+        check(!none.get("screen_open").getAsBoolean() && none.keySet().size() == 1,
+                "gui: no-screen result is exactly {screen_open:false}");
+
+        // --- fallback shape: rects from partial collection, note, no widgets field
+        GuiContracts.WidgetCollector partial = new GuiContracts.WidgetCollector();
+        partial.add(new GuiContracts.WidgetNode("Button", 1, 2, 30, 40, true, true, "Done", "txt"));
+        JsonObject fallback = GuiContracts.fallbackResult(false, "ModdedScreen", partial,
+                "widget traversal failed: NPE");
+        check(fallback.get("screen_open").getAsBoolean() && !fallback.get("in_game").getAsBoolean()
+                        && fallback.get("fallback").getAsBoolean()
+                        && "ModdedScreen".equals(fallback.get("screen_class").getAsString())
+                        && fallback.get("note").getAsString().contains("traversal failed"),
+                "gui: fallback result flags fallback + carries screen_class and note");
+        JsonObject rect = fallback.get("rects").getAsJsonArray().get(0).getAsJsonObject();
+        check("Button".equals(rect.get("type").getAsString()) && rect.get("width").getAsInt() == 30
+                        && !rect.has("visible") && !rect.has("message") && !rect.has("text")
+                        && !fallback.has("widgets"),
+                "gui: fallback rects keep geometry only (no flags/message/text)");
+        JsonObject emptyFallback = GuiContracts.fallbackResult(true, "X", new GuiContracts.WidgetCollector(), "e");
+        check(emptyFallback.get("rects").getAsJsonArray().size() == 0,
+                "gui: fallback with no collected nodes yields empty rects");
+
+        // --- role strings (the generic classification vocabulary)
+        java.util.Set<String> roles = java.util.Set.of(GuiContracts.ROLE_CRAFTING, GuiContracts.ROLE_RESULT,
+                GuiContracts.ROLE_HOTBAR, GuiContracts.ROLE_PLAYER, GuiContracts.ROLE_CONTAINER);
+        check(roles.size() == 5, "gui: five distinct role strings");
+        check("crafting".equals(GuiContracts.ROLE_CRAFTING) && "result".equals(GuiContracts.ROLE_RESULT)
+                        && "hotbar".equals(GuiContracts.ROLE_HOTBAR) && "player".equals(GuiContracts.ROLE_PLAYER)
+                        && "container".equals(GuiContracts.ROLE_CONTAINER),
+                "gui: role string mapping (crafting/result/hotbar/player/container)");
     }
 
     // ------------------------------------------------------------------ helpers

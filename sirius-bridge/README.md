@@ -2,13 +2,12 @@
 
 NeoForge mod running on the **real Minecraft client**, acting as the "eyes and hands" of the Sirius AI brain: screenshot capture, input injection, and event push. See `../docs_agent/sirius-technical.md` §8.2 for the full spec.
 
-> Current status: **M2-B event push implemented** - the bridge now pushes
-> `notification` frames (chat, GUI open/close, danger states, a throttled
-> ~100KB screenshot stream) to clients that subscribe with `events.subscribe`.
-> Together with the M2-A input primitives (`input.*`) and the M1-C perception
-> tools (`screenshot`, `getStats`, `world.query`) the bridge has "eyes",
-> "hands" and a passive attention channel. `look*`/`getGuiState` and
-> `events.watch` land in M3+.
+> Current status: **M2-C GUI state implemented** - `getGuiState` reports the
+> open screen's widget tree and container slots as structured JSON. Together
+> with the M2-A input primitives (`input.*`), the M1-C perception tools
+> (`screenshot`, `getStats`, `world.query`) and the M2-B event push channel
+> the bridge has "eyes", "hands", a passive attention channel and GUI
+> comprehension. `look*` and `events.watch` land in M3+.
 
 ## Versions
 
@@ -75,6 +74,7 @@ keep_running_unfocused = true # disable vanilla pause-on-lost-focus at runtime (
 | `request` `getStats` | see "The perception tools" below |
 | `request` `world.query` | see "The perception tools" below |
 | `request` `input.key` / `input.text` / `input.mouseMove` / `input.click` | see "The input tools" below |
+| `request` `getGuiState` | see "The GUI state tool" below |
 | `request` `events.subscribe` | see "The event push channel" below |
 | `request` any other method | `-32601` `not implemented: <method>` (until M3) |
 | `task` (NEKO) | immediate `task_finished` `status=interrupted` `text="not implemented"`, `task_id` echoed verbatim (placeholder until M3) |
@@ -453,6 +453,68 @@ and never an exception into the game. Shutdown reports the totals
 (`EVENTS_STOP pushed=.. dropped=..`). Stream frames that fail to encode are
 logged and skipped - the next 1 Hz sample replaces them.
 
+## The GUI state tool (M2-C)
+
+`getGuiState()` takes **no parameters** (any member in `params` answers
+`-32602`) and returns a structural snapshot of the currently open `Screen`
+- the alternative to OCR-ing screenshots: exact widget geometry, text-field
+contents and container-slot item ids, in one request.
+
+- **No screen open**: `{"screen_open": false}` (not an error).
+- **Standard response**:
+
+```json
+{"screen_open": true, "in_game": true, "screen_class": "InventoryScreen",
+ "widgets": [{"type": "Button", "x": 210, "y": 170, "width": 40, "height": 20,
+              "visible": true, "active": true, "message": "Reset Demo"},
+             {"type": "EditBox", "x": 5, "y": 6, "width": 100, "height": 16,
+              "visible": true, "active": true, "text": "hello"}],
+ "slots": [{"index": 0, "x": 154, "y": 28, "role": "result",
+            "item": "minecraft:oak_log", "count": 12},
+           {"index": 9, "x": 30, "y": 40, "role": "player", "item": null, "count": 0}],
+ "truncated": false}
+```
+
+- `widgets` comes from a recursive walk of the screen's `children()` tree
+  (depth-bounded at 12, capped at **512** nodes - beyond that `truncated:true`
+  and enumeration stops, the world.query discipline). Each node carries the
+  class simple name as `type`, geometry, `visible`/`active` flags, `message`
+  (`getMessage().getString()` - **omitted when empty**) and `text` for text
+  fields (`EditBox.getValue()` - omitted for other widgets).
+- `slots` is present only for container screens
+  (`AbstractContainerScreen`): every `menu.slots` entry with screen position
+  `getGuiLeft()+slot.x / getGuiTop()+slot.y` (slots are 16x16 cells rendered
+  outside the children() widget tree). `item` is the registry name string or
+  JSON `null` (empty slot / access failure), `count` 0 when empty. There is
+  deliberately no slot cap - vanilla containers stay under ~50 slots and
+  slots are flat, not recursive.
+- **Role semantics** (generic detection, adopted from Numen GuiOps):
+  `crafting` (slot container is a `CraftingContainer`), `result`
+  (`ResultSlot`), `hotbar`/`player` (the player's own inventory - container
+  index < 9 = hotbar; >= 9 = player, which also covers armor 36-39 and
+  offhand 40), `container` (anything else - chest/furnace/modded). The
+  vanilla E-key inventory therefore reports 1 result + 4 crafting + 9 hotbar
+  + 32 player (27 main + 4 armor + offhand) = **46 slots**.
+- **`in_game`** mirrors the getStats convention: a screen without a world
+  (title/options screens) still reports its widgets, plus `in_game: false`
+  for context.
+- **Fallback tier**: if widget traversal throws (modded screens can be
+  creative), the response degrades instead of erroring -
+  `{"screen_open": true, "fallback": true, "screen_class": ..., "rects":
+  [...whatever geometry was collected before the failure...], "note":
+  "<failure>"}`; a broken slot likewise degrades alone to `item: null` plus a
+  per-slot `note`. getGuiState never surfaces `-32603` for screen content.
+- **Coordinate basis**: all x/y are **GUI-scaled** - the same space as the
+  `gui_scaled` object `input.mouseMove` *returns*, NOT the window pixels
+  mouseMove *takes*. To click a slot at gui (gx, gy): derive the scale from
+  any mouseMove response (`delivered px / gui_scaled` of one probe), convert
+  `gx * screenWidth / guiScaledWidth`, then mouseMove + click. On the
+  standard test client the scale is a small integer (GUI scale 2-4).
+- Known limits: modded screens with fully custom rendering may yield few or
+  zero widgets (they draw directly); slots are reliable for vanilla-style
+  containers; `message` only carries plain text (no styling metadata); the
+  response is a snapshot - the screen may change between call and click.
+
 ## Build
 
 ```bash
@@ -466,14 +528,16 @@ configuration instead.
 
 `build` also runs the **smoke test** (`gradlew smokeTest`, wired into
 `check`): an in-process `main()` that exercises the pure halves of the
-perception, input and event-push code - parameter validation, bbox cropping,
-both JPEG budget ladders, response assembly, block scan and entity filtering,
-the key-name table, the rate-limiter token bucket, evidence file naming, the
-config parser (incl. `keep_running_unfocused` defaults/round-trips),
-subscription matching, notification frame assembly, the stream throttle state
-machine (injected clock) and the streaming ladder - with no game launched
-(175 checks; a 4K incompressible-noise image verifies the 2MB RPC degrade, an
-800x600 one the 100KB stream ladder).
+perception, input, event-push and GUI state code - parameter validation,
+bbox cropping, both JPEG budget ladders, response assembly, block scan and
+entity filtering, the key-name table, the rate-limiter token bucket,
+evidence file naming, the config parser (incl. `keep_running_unfocused`
+defaults/round-trips), subscription matching, notification frame assembly,
+the stream throttle state machine (injected clock), the streaming ladder,
+plus widget/slot node assembly, the 512-node cap and all three getGuiState
+response shapes - with no game launched (193 checks; a 4K
+incompressible-noise image verifies the 2MB RPC degrade, an 800x600 one the
+100KB stream ladder).
 
 ## Deploy to test client
 
@@ -508,8 +572,10 @@ src/main/java/io/sirius/bridge/
     PerceptionTools.java  M1-C shells: framebuffer grab, player/level reads (main thread)
     InputTools.java       M2-A shells: event-callback injection, GUI click evidence (main thread)
     EventPusher.java      M2-B shell: notification emit choke point (chat/gui/danger/screenshot stream)
+    GuiTools.java         M2-C shell: screen widget tree + container slot reads (main thread)
     ToolContracts.java    pure: param validation + response assembly + world scan logic
     InputContracts.java   pure: input param validation + result assembly + evidence naming
+    GuiContracts.java     pure: GUI state node/slot assembly, cap + truncation, response shapes
     EventsContracts.java  pure: event levels, subscription matching, notification shape, stream throttle
     KeyCodes.java         pure: logical key names -> GLFW keycodes (1.21.1 InputConstants values)
     TokenBucket.java      pure: input rate limiter (clock injectable for the smoke test)
@@ -523,8 +589,8 @@ src/main/resources/assets/sirius_bridge/   Asset placeholder
 
 ## Next steps (per §8.2 of the technical spec)
 
-- M3+: `look`/`lookAt`, `getGuiState`, `events.watch` (stat/condition
-  watches with hysteresis + cooldown - deliberately NOT implemented in M2-B).
+- M3+: `look`/`lookAt`, `events.watch` (stat/condition watches with
+  hysteresis + cooldown - deliberately NOT implemented in M2-B).
 - Natural M2-B extensions: more event sources just call
   `EventPusher.push` (one method, thread-safe); a reconnect replay could
   consume the stream ring buffer; the danger catalogue (hunger, weather,
