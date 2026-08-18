@@ -18,8 +18,9 @@
 
 ## 2. 开工前（按序读完再动手）
 
+0. **环境自检（拿到项目第一件事）**：检查仓库根是否有 `ENV.local.md`（gitignored，各开发者独立）。**没有则从 `docs_agent/ENV.template.md` 复制创建**，逐项核对本机路径（git/python/uv/JDK/代理/测试客户端实例）并填入真实值；已有则核对内容与当前机器是否一致（换机/重装后必须更新）。后续所有命令中的机器相关路径以 `ENV.local.md` 为准
 1. **本文件**（RULES）
-2. `DEVELOPMENT.md` —— 环境、命令、schema 链、常见坑
+2. `DEVELOPMENT.md` —— 环境、命令、schema 链、常见坑（通用版；与本机差异记在 `ENV.local.md`）
 3. `dev-journey.md` —— 历史决策叙事（为什么走到今天）
 4. `session/` 最近 1-2 篇日志 —— 上轮做了什么、留了什么尾巴
 5. `PROGRESS.md` —— 跨会话状态锚点（做到哪了、接下来干什么）
@@ -71,6 +72,8 @@
 | 文档 | 受众 | 作用 | 更新时机 |
 |---|---|---|---|
 | **RULES.md（本文件）** | agent | 工作方式唯一权威：流程/门禁/文档地图 | 流程变更（需用户确认） |
+| 根 `ENV.local.md`（gitignored） | 本机 agent | 本开发者机器的环境路径实录（git/python/uv/JDK/代理/客户端实例）；**不含于任何提交** | 拿到项目时创建；换机/重装/路径变化时 | 
+| `ENV.template.md` | agent | ENV.local.md 的模板（入库） | 结构变更时（随 RULES 确认） |
 | 根 `AGENTS.md` | agent | agent 自动加载入口，指向 RULES | 与 RULES 同步 |
 | `DEVELOPMENT.md` | agent | 操作手册：环境/命令/schema 链/常见坑 | 环境或操作变化时 |
 | `dev-journey.md` | agent | 历史决策叙事（为什么） | 重大决策落地时追加 |
@@ -90,3 +93,4 @@
 |---|---|---|
 | 2026-08-18 | 创建 | 用户确立的固定工作方式（原文落地）+ 本日文档基建轮实践 |
 | 2026-08-19 | sirius-design.md 归类调整：docs_agent/ → docs_human/（纯思路文档给人读，agent 读 sirius-technical.md 带技术路线版）；§8 文档地图同步 | 用户裁决 |
+| 2026-08-19 | 新增 ENV.local.md 机制：§2 第 0 步环境自检（拿到项目先建/核对）；模板 ENV.template.md 入库，本机文件 gitignored 保护隐私 | 用户要求 |

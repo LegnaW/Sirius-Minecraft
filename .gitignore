@@ -33,3 +33,6 @@ Thumbs.db
 .minecraft/
 .hmcl/
 HMCL-*.exe
+
+# Per-developer local environment paths (see docs_agent/ENV.template.md)
+ENV.local.md
