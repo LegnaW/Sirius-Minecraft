@@ -72,3 +72,16 @@
   - 权限分级是进程级（config），非 per-connection；hello token 单一
   - command() 时序常量（0.4/0.3/0.5s）为经验值，真机如丢字再调
 - 关联报告：M2-A（事件层注入方法论/InputGuard 前置）、M2-A2（失焦行为——look 不受窗口焦点影响，动作层无 isWindowActive 门）、M1-C（latch 模式）
+
+## 真机验证结果（2026-08-19，主管执行，D 盘机）
+
+### 部分 1：look/lookAt/command（PASS，一次通过）
+- look 0°/180° 双截图 92.4% 像素不同（视角确已转动）；lookAt 头顶 10 格 → yaw/pitch 精确 (-90,-90)
+- command("/give apple 1") → 苹果落入 hotbar 首格（getGuiState 确认）
+
+### 部分 2：M2 里程碑收官验收（PASS）
+- 全屏（高分辨率）+ armor/offhand 角色修复（46becd8）后重跑 `m2_final.py`
+- 链路：/give 原木 → E → getGuiState 定位（role 过滤）→ 坐标换算（scale 0.25 自适应）→ 左键拖原木入格 → 取 4 板入 player 槽 idx=9 → 右键放单板×3+左键 1 → 工作台入包
+- **终态双通道确认**：getGuiState 断言 crafting_table@player idx=9 count=1；qwen3.7-plus 高分辨率识图独立确认"工作台在主背包区最左上第一格"（与本轮首次 854x480 下木板/原木混淆形成对照——分辨率建议成立）
+- 证据：m2_final_1~4 截图；中断根因记录：首跑木板被点入头盔槽（armor 槽容器=玩家 Inventory 被归 player 角色）→ role 细分修复
+- **意义：M2 验收标准"纯脚本重放按 E 开背包→拖木头→合成工作台"达成——项目可行性证明点（四原则之"风险前置"全链路闭环）**
