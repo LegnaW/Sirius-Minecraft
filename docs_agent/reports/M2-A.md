@@ -1,4 +1,4 @@
-# M2-A 工作报告
+﻿# M2-A 工作报告
 
 - 任务：sirius-bridge 四个输入原语（input.key / input.text / input.mouseMove / input.click）：事件层注入 + 限频 + 审计 + GUI 点击留证
 - 日期：2026-08-18
@@ -120,3 +120,10 @@
 13. **失焦不暂停生效**：默认 config 启动进单人世界 → 切走焦点 >5s → 世界不暂停（getStats 心跳照跑、不弹暂停菜单）；对照：`keep_running_unfocused=false` 重启后切焦点 ~1s 弹暂停菜单（可选）
 14. **失焦时 input.key 有效**：切走焦点 → `input.key {"code":"E"}` 开背包 / `input.key {"code":"W","duration_ms":1000}` 位移（screenshot 验证）
 15. **失焦时视角转动行为**：切走焦点 → 两次 `input.mouseMove`（不同 x）→ 视角不动（预期=已知限制）；回焦后同操作视角恢复转动
+
+
+## 真机验证结果（2026-08-19，主管执行）
+
+- **核心验证 PASS**：`input.key E` 开背包（mouseMove 响应 screen_open=true + gui_scaled 返回）→ 再 E 关闭；VLM 双图确认界面开/关正确。证据：`docs_agent/m2-evidence/m2a_inventory_{open,closed}.jpg`
+- 世界：生存模式（用户已切换，M2-C 直接可用）
+- 待用户肉眼补测：失焦不暂停生效、失焦时远程按键有效（12+3 项清单见上文，其余待 M2-C 全流程覆盖）

@@ -4,7 +4,7 @@
 > 设计内容不写这里（在 [sirius-design.md](../docs_human/sirius-design.md) / [sirius-technical.md](./sirius-technical.md)），这里只记"做到哪了、接下来干什么"。
 > 最后更新：2026-08-19
 
-## 当前阶段：M1（眼睛）已完成——全部验收通过，含真机集成验收；待启动 M2（手）
+## 当前阶段：M2（手）进行中——M2-A/A2 完成并真机验证通过（注入保真度风险解除）；M2-B（事件系统+getGuiState）待派发，M2-C（合成演示）待做
 
 ## 已完成
 
@@ -29,6 +29,9 @@
 - [x] **M1-D**：Python BridgeClient（重连监督、hello 首帧保证、RPC uuid 配对、NEKO 帧回调、事件分发 seq 校验）；29 测试，累计 191 绿；CLI 对 mock 实测
 - [x] **M1-E**：真机验收 PASS（HMCL 1.21.1-Sirius + sirius_bridge jar）：token 握手、12 能力协商、getStats/world.query 未进世界优雅降级 in_game:false、854x480 截图存盘（72KB JPEG，VLM 确认为完整标题画面）；证据 docs_agent/m1-evidence/m1e_screenshot.jpg
 - [x] **1.21.1 API 坑记录**（M1-C 报告，M2 必读）：GUI 画进主渲染目标→Screenshot.takeScreenshot 即含 GUI；Minecraft.execute 任务帧首执行但最小化时饿死→latch 超时；NativeImage 小端 ABGR 转 ARGB；Holder.getRegisteredName() 拿注册名
+- [x] **M2-A**：input.* 四原语完成并验收（事件层注入：KeyboardHandler.keyPress/MouseHandler.onMove/onPress/charTyped 反射直调；令牌桶限频 20/s；GUI 点击留证 logs/sirius_evidence/；键名→GLFW 映射表；smoke 111→119）
+- [x] **M2-A2**：失焦不暂停补丁（keep_running_unfocused 默认 true，运行时直写 Options.pauseOnLostFocus=false——1.21.1 是 plain boolean 字段非 OptionInstance；绝不写 options.txt；失焦时 key/text/click 仍有效，视角转动失焦失效记为 M4 已知限制）
+- [x] **M2-A 真机验证 PASS（2026-08-19）**：按 E 开背包→截图→mouseMove→按 E 关背包，VLM 双图确认开/关正确；screen_open 状态与 gui_scaled 坐标返回精确。**事件层注入保真度验证通过，项目最高风险点解除**
 - [x] **文档基建轮（2026-08-18）**：双层文档体系落位——`docs_agent/`（原 docs_for_agents 改名归位 + 新增 DEVELOPMENT.md / dev-journey.md / session/）与 `docs_human/`（overall.md 全局技术文档，人读）；根 README 建立；工作方式固化为 `RULES.md`（开工必读唯一权威）+ 根 `AGENTS.md` 自动加载入口；同日双门禁全过（pytest 191 + gradlew smoke 45）
 - [x] **design 文档归类调整（2026-08-19）**：sirius-design.md 移入 docs_human/（用户裁决：纯思路文档给人读，agent 读 sirius-technical.md 带技术路线版）；交叉引用与 RULES 文档地图同步
 - [x] **PR #1 合并（2026-08-19）**：另一会话的双层文档重构经本地审查（191 测试/23 文档编码/路径残留零）后 merge 入 main（cf15a80）
