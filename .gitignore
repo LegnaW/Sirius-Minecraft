@@ -1,3 +1,6 @@
+.zcode/
+.claude/
+
 # Python (sirius-brain)
 __pycache__/
 *.py[cod]
