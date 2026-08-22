@@ -58,6 +58,8 @@ public final class SmokeMain {
         lookContracts();
         digContracts();
         permissionContracts();
+        chatContracts();
+        movementLook();
 
         System.out.println();
         System.out.println("smoke: " + passed + " passed, " + failures.size() + " failed");
@@ -631,11 +633,12 @@ public final class SmokeMain {
                 && !shot.get("downscaled").getAsBoolean(),
                 "contracts: screenshotResult fields");
 
-        // --- statsResult
+        // --- statsResult (yaw/pitch: M4.1 v1.3 additions, additive fields)
         ToolContracts.StatsSnapshot stats = new ToolContracts.StatsSnapshot(
                 18.5f, 17, 4.2f, 300, 27, 0.6f,
                 1.5, 64.0, -12.25, "minecraft:overworld", "survival",
-                List.of(new ToolContracts.EffectFact("minecraft:speed", 1200, 1)), true);
+                List.of(new ToolContracts.EffectFact("minecraft:speed", 1200, 1)), true,
+                -91.5f, 12.25f);
         JsonObject statsJson = ToolContracts.statsResult(stats);
         check(statsJson.get("in_game").getAsBoolean()
                 && statsJson.get("health").getAsFloat() == 18.5f
@@ -650,8 +653,10 @@ public final class SmokeMain {
                 && statsJson.get("effects").getAsJsonArray().size() == 1
                 && statsJson.get("effects").getAsJsonArray().get(0).getAsJsonObject()
                         .get("id").getAsString().equals("minecraft:speed")
-                && statsJson.get("alive").getAsBoolean(),
-                "contracts: statsResult full shape");
+                && statsJson.get("alive").getAsBoolean()
+                && statsJson.get("yaw").getAsFloat() == -91.5f
+                && statsJson.get("pitch").getAsFloat() == 12.25f,
+                "contracts: statsResult full shape (incl. M4.1 yaw/pitch)");
 
         // --- scanBlocks: solid 3x3x3 with one air hole, range 1
         JsonObject small = ToolContracts.scanBlocks(0, 0, 0, 1,
@@ -706,6 +711,26 @@ public final class SmokeMain {
         check(ToolContracts.filterEntities(dropFacts, 0, 64, 0, 16,
                         List.of("minecraft:item")).get("count").getAsInt() == 1,
                 "contracts: entities type filter picks the item entity by type id");
+
+        // --- filterEntities: M4 additive category + width fields
+        List<ToolContracts.EntityFact> mobFacts = List.of(
+                new ToolContracts.EntityFact("m-1", "Zombie", "minecraft:zombie",
+                        2, 64, 1, 20f, null, 0, "monster", 0.6),
+                new ToolContracts.EntityFact("m-2", "Cow", "minecraft:cow",
+                        3, 64, 1, 10f, null, 0, "creature", 0.9),
+                new ToolContracts.EntityFact("m-3", "Old", "minecraft:zombie",
+                        1, 64, 1, 20f));
+        JsonObject mobs = ToolContracts.filterEntities(mobFacts, 0, 64, 0, 8, null);
+        JsonObject zombie = mobs.get("entities").getAsJsonArray().get(0).getAsJsonObject();
+        check(zombie.has("category") && "monster".equals(zombie.get("category").getAsString())
+                        && zombie.has("width") && Math.abs(zombie.get("width").getAsDouble() - 0.6) < 1e-9,
+                "contracts: entity entry carries registry mob category + collision width (M4)");
+        JsonObject cow = mobs.get("entities").getAsJsonArray().get(1).getAsJsonObject();
+        check("creature".equals(cow.get("category").getAsString()),
+                "contracts: passive mobs report their own category");
+        JsonObject oldShape = mobs.get("entities").getAsJsonArray().get(2).getAsJsonObject();
+        check(!oldShape.has("category") && !oldShape.has("width"),
+                "contracts: pre-M4 constructors keep the old entry shape (additive only)");
 
         List<ToolContracts.EntityFact> crowd = new ArrayList<>();
         for (int i = 0; i < 200; i++) {
@@ -1394,6 +1419,43 @@ public final class SmokeMain {
                         && blocked.get("reason").getAsString().contains("water"),
                 "dig results: blocked_* carries the reason");
 
+        // --- M3.6 empirical drops: aggregate new in-radius item entities
+        List<ToolContracts.EntityFact> facts = Arrays.asList(
+                new ToolContracts.EntityFact("d1", "Oak Log", "minecraft:item",
+                        6.5, 64.5, 0.5, Float.NaN, "minecraft:oak_log", 1),
+                new ToolContracts.EntityFact("d2", "Oak Log", "minecraft:item",
+                        7.5, 64.5, 0.5, Float.NaN, "minecraft:oak_log", 2),
+                new ToolContracts.EntityFact("foreign", "Oak Log", "minecraft:item",
+                        6.5, 64.5, 1.5, Float.NaN, "minecraft:oak_log", 1),
+                new ToolContracts.EntityFact("far", "Oak Log", "minecraft:item",
+                        20.0, 64.0, 0.0, Float.NaN, "minecraft:oak_log", 1),
+                new ToolContracts.EntityFact("z1", "Zombie", "minecraft:zombie",
+                        6.0, 64.0, 0.0, 20.0F));
+        java.util.Set<String> seenBefore = java.util.Set.of("foreign");
+        List<JsonObject> drops = DigContracts.aggregateDrops(facts, seenBefore, 6.5, 64.5, 0.5,
+                DigContracts.DROPS_SCAN_RADIUS);
+        check(drops.size() == 1
+                        && "minecraft:oak_log".equals(drops.get(0).get("item").getAsString())
+                        && drops.get(0).get("count").getAsInt() == 3,
+                "dig drops: new in-radius item entities summed per id (pre-existing/far/non-item excluded)");
+        check(DigContracts.aggregateDrops(facts,
+                        java.util.Set.of("d1", "d2", "foreign", "far"), 6.5, 64.5, 0.5, 4.0).isEmpty(),
+                "dig drops: fully-snapshotted scene -> empty report (nothing new appeared)");
+        JsonObject withDrops = DigContracts.digResult(DigContracts.RESULT_BROKEN, "minecraft:oak_log",
+                3210L, null, null, drops);
+        check(withDrops.get("drops").isJsonArray()
+                        && withDrops.get("drops").getAsJsonArray().size() == 1
+                        && withDrops.get("drops").getAsJsonArray().get(0).getAsJsonObject()
+                        .get("count").getAsInt() == 3,
+                "dig results: broken carries the drops [{item,count}] array");
+        check(!DigContracts.digResult(DigContracts.RESULT_ALREADY_AIR, null, 4L, null, null).has("drops")
+                        && !DigContracts.digResult(DigContracts.RESULT_BROKEN, "minecraft:oak_log",
+                        100L, null, null, (List<JsonObject>) null).has("drops"),
+                "dig results: null drops omitted (old-jar response shape intact)");
+        check(DigContracts.DROPS_WAIT_TICKS >= 10 && DigContracts.DROPS_WAIT_TICKS <= 20
+                        && DigContracts.DROPS_SCAN_RADIUS == 4.0,
+                "dig drops: wait window bounded to <= 1 s, scan radius 4 (RPC latency budget)");
+
         // --- monitor: aim -> press -> break (the happy path)
         DigContracts.DigMonitor m = new DigContracts.DigMonitor(15000, false);
         DigContracts.TickView aiming = new DigContracts.TickView(false, false, false, false, 0);
@@ -1601,6 +1663,19 @@ public final class SmokeMain {
                         && PermissionContracts.allows(FULL, true, LOOK) && PermissionContracts.allows(FULL, false, LOOK),
                 "permissions: full allows everything (default = M2-A behaviour)");
 
+        // --- M4.1 chat.send rides the CHAT action: GUI-immune, only observe denies
+        PermissionContracts.Action CHAT = PermissionContracts.Action.CHAT;
+        check(!PermissionContracts.allows(OBSERVE, true, CHAT)
+                        && !PermissionContracts.allows(OBSERVE, false, CHAT),
+                "permissions: observe denies chat.send (read-only tier)");
+        check(PermissionContracts.allows(INPUT_GUI, true, CHAT)
+                        && PermissionContracts.allows(INPUT_GUI, false, CHAT)
+                        && PermissionContracts.allows(INPUT_WORLD, true, CHAT)
+                        && PermissionContracts.allows(INPUT_WORLD, false, CHAT)
+                        && PermissionContracts.deniedRegardlessOfScreen(OBSERVE, CHAT)
+                        && !PermissionContracts.deniedRegardlessOfScreen(INPUT_GUI, CHAT),
+                "permissions: chat.send is screen-immune under every acting tier (M4.1 death-screen path)");
+
         // --- pre-flight veto helper (callers deny without a main-thread round trip)
         check(PermissionContracts.deniedRegardlessOfScreen(OBSERVE, INPUT)
                         && PermissionContracts.deniedRegardlessOfScreen(OBSERVE, LOOK)
@@ -1631,6 +1706,66 @@ public final class SmokeMain {
                         && message.contains("observe")
                         && message.contains("sirius_bridge.toml"),
                 "permissions: deniedMessage names the tier and the config key");
+    }
+
+    private static void chatContracts() throws Exception {
+        // --- validation: required, 1..256 code points
+        expectInvalid(() -> ChatContracts.chatSendParams(json("{}")),
+                "chat.send: missing string rejected");
+        expectInvalid(() -> ChatContracts.chatSendParams(json("{\"string\": \"\"}")),
+                "chat.send: empty string rejected");
+        expectInvalid(() -> ChatContracts.chatSendParams(json("{\"string\": 42}")),
+                "chat.send: non-string rejected");
+        expectInvalid(() -> ChatContracts.chatSendParams(
+                json("{\"string\": \"" + "x".repeat(257) + "\"}")),
+                "chat.send: 257 chars rejected (vanilla limit)");
+        ChatContracts.ChatSendParams ok = ChatContracts.chatSendParams(
+                json("{\"string\": \"我死了……\"}"));
+        check(ok.text().equals("我死了……"),
+                "chat.send: CJK text passes validation verbatim");
+
+        // --- result shapes
+        JsonObject notInGame = ChatContracts.notInGameChat();
+        check(!notInGame.get("in_game").getAsBoolean() && !notInGame.get("sent").getAsBoolean(),
+                "chat.send: not-in-game result is not an error");
+        JsonObject sent = ChatContracts.sentResult("hello");
+        check(sent.get("in_game").getAsBoolean() && sent.get("sent").getAsBoolean()
+                        && sent.get("length").getAsInt() == 5,
+                "chat.send: sent result carries in_game/sent/length");
+    }
+
+    private static void movementLook() {
+        // --- stationary / vertical-only motion: stay silent
+        check(MovementLook.nextYaw(90.0, 0.0, 0.0, 300.0) == null
+                        && MovementLook.nextYaw(90.0, 0.0, 0.0, 300.0) == null,
+                "movement look: no horizontal speed -> no write");
+        check(MovementLook.nextYaw(90.0, 0.0, 0.03, 300.0) == null,
+                "movement look: sub-threshold drift (fall wobble) -> no write");
+
+        // --- heading math: yaw 0 = +Z (south); moving +Z targets yaw 0,
+        //     so from current yaw 90 one 300deg/s tick steps -15 (shortest way)
+        Double north = MovementLook.nextYaw(90.0, 0.0, 0.215, 300.0);
+        check(north != null && Math.abs(north - 75.0) < 1e-9,
+                "movement look: one 50ms tick steps 15 deg toward the heading");
+        Double east = MovementLook.nextYaw(0.0, 0.215, 0.0, 300.0);
+        check(east != null && Math.abs(east - (-15.0)) < 1e-9,
+                "movement look: moving +X (east, yaw -90) turns the short way negative");
+
+        // --- deadzone: already facing the movement direction
+        check(MovementLook.nextYaw(0.0, 0.0, 0.215, 300.0) == null,
+                "movement look: within deadzone of the heading -> no write");
+
+        // --- wrap-around takes the short way: current 170, moving toward
+        //     heading -170 (velocity = the -170 view direction) -> delta +20
+        //     -> one step lands at 185 (unwrapped; vanilla normalizes on use)
+        Double wrap = MovementLook.nextYaw(170.0, 0.1736, -0.9848, 300.0);
+        check(wrap != null && Math.abs(wrap - 185.0) < 1e-9,
+                "movement look: wraps across +-180 along the shortest signed path");
+
+        // --- step clamps at the fixed angular speed, never overshoots a near target
+        Double small = MovementLook.nextYaw(5.0, 0.0, 0.06, 30.0);
+        check(small != null && Math.abs(small - 3.5) < 1e-9,
+                "movement look: 30deg/s tick (1.5 deg) never overshoots a 5-deg correction");
     }
 
     /** Named stand-in for an AbstractWidget subclass (typeName smoke checks). */

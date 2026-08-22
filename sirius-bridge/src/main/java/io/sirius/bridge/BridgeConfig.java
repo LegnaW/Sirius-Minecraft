@@ -33,6 +33,12 @@ public final class BridgeConfig {
      * byte-identical to the pre-M2-D behaviour (tiers are strictly opt-in).
      */
     public static final PermissionContracts.Tier DEFAULT_PERMISSION = PermissionContracts.Tier.FULL;
+    /**
+     * Default for {@code movement_look}: ON - the M4.1 head-turns-toward-
+     * movement fix is the intended behaviour; the key exists so a problem on
+     * the real machine can be switched off without a code change.
+     */
+    public static final boolean DEFAULT_MOVEMENT_LOOK = true;
 
     /** Resolved settings. */
     public final int port;
@@ -57,13 +63,18 @@ public final class BridgeConfig {
      * acting tool allowed). See {@link PermissionContracts} for the matrix.
      */
     public final PermissionContracts.Tier permission;
+    /**
+     * M4.1 movement look (movement_look): turn the view toward the movement
+     * direction while the player is moving (see {@link MovementLook}).
+     */
+    public final boolean movementLook;
     /** Human-readable notes gathered while loading (logged by the caller, never fatal). */
     public final String notes;
 
     private BridgeConfig(int port, String token, boolean tokenGenerated,
                          boolean inputEnabled, int rateLimitPerSec, boolean guiClickEvidence,
                          boolean keepRunningUnfocused, PermissionContracts.Tier permission,
-                         String notes) {
+                         boolean movementLook, String notes) {
         this.port = port;
         this.token = token;
         this.tokenGenerated = tokenGenerated;
@@ -72,6 +83,7 @@ public final class BridgeConfig {
         this.guiClickEvidence = guiClickEvidence;
         this.keepRunningUnfocused = keepRunningUnfocused;
         this.permission = permission;
+        this.movementLook = movementLook;
         this.notes = notes;
     }
 
@@ -87,6 +99,7 @@ public final class BridgeConfig {
         boolean guiClickEvidence = true;
         boolean keepRunningUnfocused = DEFAULT_KEEP_RUNNING_UNFOCUSED;
         PermissionContracts.Tier permission = DEFAULT_PERMISSION;
+        boolean movementLook = DEFAULT_MOVEMENT_LOOK;
         StringBuilder notes = new StringBuilder();
 
         if (Files.exists(file)) {
@@ -169,6 +182,15 @@ public final class BridgeConfig {
                                         .append(", using default ").append(DEFAULT_PERMISSION.configName()).append("; ");
                             }
                         }
+                        // M4.1 movement look - appended, existing keys keep their meaning.
+                        case "movement_look" -> {
+                            Boolean parsed = parseBoolean(value);
+                            if (parsed != null) {
+                                movementLook = parsed;
+                            } else {
+                                notes.append("movement_look not true/false: ").append(value).append("; ");
+                            }
+                        }
                         default -> {
                         }
                     }
@@ -189,7 +211,7 @@ public final class BridgeConfig {
 
         BridgeConfig config = new BridgeConfig(port, token, generated,
                 inputEnabled, rateLimitPerSec, guiClickEvidence, keepRunningUnfocused, permission,
-                notes.toString().trim());
+                movementLook, notes.toString().trim());
         config.save(file);
         return config;
     }
@@ -228,6 +250,10 @@ public final class BridgeConfig {
                 #                                 look/lookAt allowed.
                 #                     full       = everything allowed (default,
                 #                                 identical to the pre-M2-D behaviour).
+                # movement_look     : M4.1 - while the player is moving, the view turns
+                #                     toward the movement direction at a fixed angular
+                #                     speed (default true). Explicit lookAt/dig aiming
+                #                     always takes precedence.
                 port = %d
                 token = "%s"
                 input_enabled = %s
@@ -235,8 +261,9 @@ public final class BridgeConfig {
                 gui_click_evidence = %s
                 keep_running_unfocused = %s
                 permission = "%s"
+                movement_look = %s
                 """.formatted(port, token, inputEnabled, rateLimitPerSec, guiClickEvidence,
-                keepRunningUnfocused, permission.configName());
+                keepRunningUnfocused, permission.configName(), movementLook);
         try {
             Files.createDirectories(file.getParent());
             Files.writeString(file, content, StandardCharsets.UTF_8);

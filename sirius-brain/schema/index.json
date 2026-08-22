@@ -1,6 +1,6 @@
 {
-  "protocol_version": "1.2",
-  "exported_at": "2026-08-19T18:49:25Z",
+  "protocol_version": "1.3",
+  "exported_at": "2026-08-20T17:20:47Z",
   "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
   "generator": "sirius_brain.protocol.export_schema",
   "categories": {
@@ -27,6 +27,7 @@
       "input.click": "tools/input.click.json",
       "input.key": "tools/input.key.json",
       "input.text": "tools/input.text.json",
+      "chat.send": "tools/chat.send.json",
       "events.subscribe": "tools/events.subscribe.json",
       "events.watch": "tools/events.watch.json"
     },
@@ -53,6 +54,7 @@
     "tasks/ReportProgress.json",
     "tasks/RequestDecision.json",
     "tasks/TaskCard.json",
+    "tools/chat.send.json",
     "tools/dig.json",
     "tools/events.subscribe.json",
     "tools/events.watch.json",

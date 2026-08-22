@@ -114,10 +114,14 @@ class _StepResult:
     """原语内部微步骤结果（public 方法把它包装成 ToolOutcome 文本）。
 
     ok=False 时 text 已是"失败 + 下一步建议"的教学文案，可直接上抛给 VLM。
+    drops（M3.6 T3）：dig 破坏确认后 bridge 实测的掉落清单 [{item,count}]——
+    broken 且新版 bridge 才有；None = 无此信息（旧 jar/未破坏），调用方回落
+    registry id 匹配；[] = 明确无掉落（如树叶没掉苗），不要回落。
     """
 
     ok: bool
     text: str
+    drops: list[dict[str, Any]] | None = None
 
 
 def _fmt(value: float) -> str:
@@ -444,10 +448,18 @@ class Primitives:
         block = str(result.get("block") or block_id or "方块")
         via_occluder = bool(result.get("broken_via_occluder"))
         reason = result.get("reason")
+        drops = self._extract_drops(result)
         if kind == "broken":
             note = "（视线先穿过遮挡物挖通的）" if via_occluder else ""
-            logger.info("dig（bridge）完成：(%d,%d,%d) 的 %s%s", x, y, z, block, note)
-            return _StepResult(True, f"已挖掉 {block}（{x},{y},{z}）{note}")
+            # 掉落随话术播报（经验实测清单，模组方块零硬编码——VLM 据此能直接
+            # 回答"挖到了什么"）；drops=None（旧 jar）不提，[] 如实说无掉落
+            drop_note = ""
+            if drops is not None:
+                drop_note = ("，掉落 " + "、".join(
+                    f"{d['item']}×{d['count']}" for d in drops)) if drops else "，无掉落"
+            logger.info("dig（bridge）完成：(%d,%d,%d) 的 %s%s%s", x, y, z, block, note, drop_note)
+            return _StepResult(True, f"已挖掉 {block}（{x},{y},{z}）{note}{drop_note}",
+                               drops=drops)
         if kind == "already_air":
             return _StepResult(
                 True, f"目标方块 ({x},{y},{z}) 已不存在（此前已挖掉或本就是空气），无需再挖")
@@ -466,6 +478,25 @@ class Primitives:
         return _StepResult(
             False, f"挖掘 ({x},{y},{z}) 返回未知结果 {kind!r}（耗时 {elapsed:.1f}s）；"
                    f"建议 screenshot 观察现状后重试")
+
+    @staticmethod
+    def _extract_drops(result: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """dig 返回的 drops 字段 → 规整后的 ``[{item,count}]``。
+
+        None = 字段缺失（旧 jar v1.2 或非 broken 结果），调用方回落 registry id
+        匹配；字段存在则只收形态健全的条目（畸形条目丢弃，整表空 = 真无掉落）。
+        """
+        drops = result.get("drops")
+        if not isinstance(drops, list):
+            return None
+        shaped: list[dict[str, Any]] = []
+        for entry in drops:
+            if not isinstance(entry, dict):
+                continue
+            item, count = entry.get("item"), entry.get("count")
+            if isinstance(item, str) and isinstance(count, int) and not isinstance(count, bool):
+                shaped.append({"item": item, "count": count})
+        return shaped
 
     # ------------------------------------------------------------------ collect_block
 
@@ -530,12 +561,14 @@ class Primitives:
                 destroyed += 1
                 if pickup:
                     # 挖后拾取（T7）：掉落物落在挖掉的方块旁 1-2 格，vanilla 拾取半径
-                    # ~1 格需走过去吸附。匹配集 = 实际挖掉的方块 id（logs 类挖啥掉啥）
-                    # + block_ids 的纯 id 项；#tag 项无法在 item 注册名上展开，忽略
+                    # ~1 格需走过去吸附。匹配集优先级（M3.6 T3）：dig 实测 drops >
+                    # registry id（挖掉的方块 id + block_ids 纯 id 项；#tag 无法在
+                    # item 注册名上展开，忽略）
                     drop_ids = [nearest["block"]] + [b for b in block_ids
                                                      if not b.startswith("#")]
                     picked += await self._collect_drops(
-                        (bx + 0.5, by + 0.5, bz + 0.5), drop_ids, cancel=cancel)
+                        (bx + 0.5, by + 0.5, bz + 0.5), drop_ids,
+                        drops=dig.drops, cancel=cancel)
                 logger.info("collect_block 进度：%d/%d 个 %s（累计拾取 %d 件掉落）",
                             destroyed, count, label, picked)
             else:
@@ -562,34 +595,48 @@ class Primitives:
 
     async def _collect_drops(self, dug_pos: tuple[float, float, float],
                              item_ids: list[str],
+                             drops: list[dict[str, Any]] | None = None,
                              cancel: CancelFlag = None) -> int:
-        """挖后拾取：捡走 dug_pos 附近（DROP_NEAR_DIG_DIST 内）、item 注册名匹配
-        item_ids 的掉落物，返回捡到件数（0 也是正常收尾——掉落被烧毁/被别人先捡）。
+        """挖后拾取：捡走 dug_pos 附近（DROP_NEAR_DIG_DIST 内）、匹配的掉落物，
+        返回捡到件数（0 也是正常收尾——掉落被烧毁/被别人先捡）。
+
+        匹配集优先级（M3.6 T3）：**dig 实测 drops**（bridge 破坏后实测掉落实体，
+        经验主义——模组方块掉什么就捡什么，零硬编码）> registry id 精确匹配
+        （item_ids，旧 jar 无 drops 字段时的兼容回落）。drops=[] 是明确无掉落，
+        直接收 0 不回落（避免把别人的同 id 掉落误当自己的捡走）。
 
         多人服礼仪：匹配集外的掉落绝对不碰（别人的掉落/树叶掉的树苗等）；#tag 条目
         无法在 item 注册名上展开（无 item tag 查询通道），保守忽略。
         """
-        wanted = {i for i in item_ids if not i.startswith("#")}
+        if drops is not None:
+            wanted = {str(d["item"]) for d in drops if isinstance(d.get("item"), str)}
+        else:
+            wanted = {i for i in item_ids if not i.startswith("#")}
         if not wanted:
             return 0
         picked, _skipped = await self._sweep_drops(
             wanted, center=dug_pos, near_limit=DROP_NEAR_DIG_DIST, cancel=cancel)
         return picked
 
-    async def pickup(self, item_ids: list[str],
+    async def pickup(self, item_ids: list[str] | None = None,
                      radius: float = DROP_QUERY_RANGE,
                      timeout: float = PICKUP_TIMEOUT,
                      cancel: CancelFlag = None) -> ToolOutcome:
-        """捡起身边 radius 格内 item_ids 匹配的掉落物（Numen collect_items 对应物）。
+        """捡起身边 radius 格内的掉落物（Numen collect_items 对应物，M3.6 注册为 VLM 工具）。
 
         走到每个匹配掉落物旁让 vanilla 吸附；实体消失 = 已拾取（无论谁捡的）。
-        0 件也是成功（"范围内没有可捡的"）。不注册进工具表（T3 注册表层不动，
-        M4 再议暴露）。
+        item_ids 给定时只捡注册名匹配的（#tag 条目无法展开，见 _collect_drops）；
+        缺省（None）捡范围内**全部**掉落——多人服礼仪靠调用方（VLM 工具描述）约束：
+        只对明确属于自己活动的掉落使用缺省形式。0 件也是成功（"范围内没有可捡的"）。
         """
-        wanted = {i for i in item_ids if not i.startswith("#")}
-        label = ",".join(item_ids)
-        if not wanted:
-            return ToolOutcome(f"pickup 需要至少一个非 #tag 的物品注册名，收到 {label}")
+        if item_ids is None:
+            wanted: set[str] | None = None
+            label = "全部掉落物"
+        else:
+            wanted = {i for i in item_ids if not i.startswith("#")}
+            label = ",".join(item_ids)
+            if not wanted:
+                return ToolOutcome(f"pickup 需要至少一个非 #tag 的物品注册名，收到 {label}")
         picked, _skipped = await self._sweep_drops(
             wanted, center=None, near_limit=None, radius=radius, timeout=timeout,
             cancel=cancel)
@@ -597,7 +644,7 @@ class Primitives:
             return ToolOutcome(f"已捡起 {picked} 个 {label}")
         return ToolOutcome(f"范围 {radius:.0f} 格内没有可捡的 {label}")
 
-    async def _sweep_drops(self, wanted: set[str], *,
+    async def _sweep_drops(self, wanted: set[str] | None, *,
                            center: tuple[float, float, float] | None,
                            near_limit: float | None,
                            radius: float = DROP_QUERY_RANGE,
@@ -608,9 +655,9 @@ class Primitives:
         SCAN（查匹配掉落，无 → 收）→ APPROACH（walk_to 到它旁边）→ 实体消失 =
         已拾取（无论谁捡的）；走到身旁（≤PICKUP_ARRIVE_DIST）仍没吸上 / 走不过去
         → skip 该实体（防死循环）。每轮有捡到或跳过即有进度，无进度或超时即收。
-        center+near_limit 给定时只捡中心点 near_limit 格内的（挖后拾取的"只捡
-        自己挖出的"约束）；缺省时整个 radius 圈内都算（pickup() 语义）。
-        返回 (捡到件数, 跳过件数)。
+        wanted=None 是"全部掉落"（pickup 缺省形式）；center+near_limit 给定时只捡
+        中心点 near_limit 格内的（挖后拾取的"只捡自己挖出的"约束）；缺省时整个
+        radius 圈内都算（pickup() 语义）。返回 (捡到件数, 跳过件数)。
         """
         picked = 0
         skipped = 0
@@ -634,8 +681,10 @@ class Primitives:
                 break
             candidates = []
             for drop in drops:
-                if drop["uuid"] in skip_uuids or drop["item"] not in wanted:
+                if drop["uuid"] in skip_uuids:
                     continue
+                if wanted is not None and drop["item"] not in wanted:
+                    continue  # 匹配集外：别人的/不相干的掉落绝对不碰（多人服礼仪）
                 if (near_limit is not None and center is not None
                         and _dist2(drop["x"], drop["y"], drop["z"], *center)
                         > near_limit * near_limit):

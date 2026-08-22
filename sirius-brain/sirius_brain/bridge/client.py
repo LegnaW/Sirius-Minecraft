@@ -26,6 +26,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ from sirius_brain.protocol import (
     Capability,
     EventLevel,
     EventsSubscribeParams,
+    HelloAckFrame,
     NotificationFrame,
     TaskFinishedFrame,
     TaskFrame,
@@ -85,17 +87,32 @@ TaskFinishedHandler = Callable[[TaskFinishedFrame], Any]
 HelloStatus = Literal["no-token", "acked", "ignored", "timeout"]
 
 # command() 用的 GLFW 键码（冻结 schema input.key.code 声明的是整数；键名是
-# Mod 侧的扩展。GLFW: 字母=大写 ASCII，ENTER=257——与 KeyCodes.java 一致）
+# Mod 侧的扩展。GLFW: 字母=大写 ASCII，ENTER=257、ESC=256——与 KeyCodes.java 一致）
 GLFW_KEY_T = 84
 GLFW_KEY_ENTER = 257
+GLFW_KEY_ESCAPE = 256
+
+# M4.1 T1：command() 的 GUI 确认时序参数（秒；测试可 monkeypatch 缩短）。
+# 背景：M4-rerun 00:41:01 的 `Command not found: stop#goto`——两条并发 command 的
+# T→text→ENTER 在 wire 上交错，两段文本进了同一个聊天框。修法两层：
+# 1) 命令级锁（本客户端实例内串行化整个三连时序）；
+# 2) 时序确认替代拍定时数：T 后轮询 getGuiState 等聊天屏**确实打开**（开不了就
+#    报错拒绝盲发——顺带消灭"ENTER 误点 GUI 按钮"风险）；ENTER 后等聊天屏
+#    **确实关闭**再放行下一条（关不掉说明发送失败，按 ESC 丢弃残留输入防串扰）。
+CHAT_OPEN_TIMEOUT = 0.8     # T 后等聊天屏打开的上限
+CHAT_CLOSE_TIMEOUT = 1.2    # ENTER 后等聊天屏关闭的上限
+CHAT_POLL_INTERVAL = 0.06   # 确认轮询间隔
+LEGACY_OPEN_SLEEP = 0.4     # 身体不支持 getGuiState 确认（回包无 screen_open）时的保守等待
+LEGACY_CLOSE_SLEEP = 0.3
 
 
 class HelloFrame(BaseModel):
     """连接后首条消息的 token 握手帧。spec §8.2 安全模型。
 
     真 Mod（M1-B/C）要求此帧；mock 不校验也不要求（会回一条 -32600 的未知帧错误，
-    客户端按 best-effort 忽略）。protocol/ 未定义 hello（它不是工具调用协议的一部分），
-    故在此定义——不与既有协议模型重复。
+    客户端按 best-effort 忽略）。protocol/ 只建模了回应帧 HelloAckFrame（M3.6 起被
+    接收循环识别）；请求帧 hello 不是工具调用协议的一部分，仍定义在此不进
+    protocol/（schema 导出不覆盖握手帧，避免与 HelloFrame 单侧重复）。
     """
 
     type: Literal["hello"] = "hello"
@@ -170,6 +187,9 @@ class BridgeClient:
         self._state = BridgeState.DISCONNECTED
         self._ws: ClientConnection | None = None
         self._send_lock = asyncio.Lock()
+        # M4.1 T1：命令编排级锁——同一客户端实例上并发的 command() 绝不允许
+        # T→text→ENTER 序列在 wire 上交错（两条文本会进同一个聊天框合并成一行）
+        self._command_lock = asyncio.Lock()
         self._supervisor: asyncio.Task | None = None
         self._closing = False
         self._ready: asyncio.Future[None] | None = None
@@ -322,30 +342,126 @@ class BridgeClient:
 
     async def command(self, text: str, settle: float = 0.5,
                       timeout: float | None = None) -> Any:
-        """聊天/命令编排：T 开聊天框 → 输入文本 → ENTER 发送 → 等待生效。
+        """聊天/命令编排：T 开聊天框 → 输入文本 → ENTER 发送 → 确认关闭 → 等待生效。
 
-        按"人类打命令"的时序串联三个 M2-A 原语（缺一步游戏都可能丢字）：
-        ``input.key {"code":84}``（T，默认 50ms tap）→ 0.4s 等聊天框真正获得焦点 →
-        ``input.text {"string": text}`` → 0.3s 等全部码点入框 →
-        ``input.key {"code":257}``（ENTER）发送 → ``settle`` 秒收尾。
-        code 用整数键码是冻结 schema 的形态（键名 "T"/"ENTER" 只是 Mod 侧扩展）。
+        按"人类打命令"的时序串联三个 M2-A 原语，M4.1 起整个序列持**命令级锁**
+        （本客户端实例内串行）：并发调用（反射 #stop + 探针 #goto、任务播报 +
+        反射撤离……）在 wire 上绝不可能交错——M4-rerun 的 `stop#goto` 合并事故
+        （反射连发两命令被吞、bot 被围殴致死）即两条序列交错的直接后果。
+
+        时序上不再纯拍定时数，每一步有 GUI 状态确认（getGuiState 轮询）：
+
+        1. ``input.key T`` → 轮询等待聊天屏**确实打开**（≤``CHAT_OPEN_TIMEOUT``）；
+           到时若被**其他 GUI 屏占用** → 抛 ``BridgeError``，**不输入文本不按
+           ENTER**（旧行为会把文本盲发进任意 GUI、ENTER 还可能误点按钮）；
+           到时**无任何屏**（T 被吞但也没别的屏占着）→ 按旧行为放行
+           （input.text 至多 delivered=0，ENTER 在世界里无害）
+        2. ``input.text`` → 0.3s 等全部码点入框（charTyped 无从确认，保留定时）
+        3. ``input.key ENTER`` → 轮询等待聊天屏**确实关闭**（≤``CHAT_CLOSE_TIMEOUT``）；
+           到时**聊天屏还在**说明发送失败 → 按 ESC 丢弃输入框残留（防止下一条
+           命令把两段文本拼进同一个框）并抛 ``BridgeError``；其他屏/无屏 → 放行
+        4. ``settle`` 秒收尾（命令在服务器生效并同步回来）
+
+        身体不支持确认（getGuiState 回包没有 ``screen_open`` 字段，如 mock）时，
+        步骤 1/3 退回 M2-D 的定时等待，行为与旧版完全一致。
 
         - ``text`` 以 ``/`` 开头即命令（``/give @s diamond 1``），否则按普通聊天
           消息发送——两者对客户端输入路径完全一致，本方法不做区分
-        - 返回最后一步（ENTER 的 input.key）的 result；任何一步被身体拒绝
+        - 返回 ENTER 那步 input.key 的 result；任何一步被身体拒绝
           （-32010 限频 / -32011 输入关闭 / -32012 权限分级 / -32602 参数）都抛
           ``BridgeError``
-        - ``settle`` 默认 0.5s：命令生效后的世界变化（如 /give 的物品进背包）
-          需要服务器往返 + 客户端容器同步，立刻截图/查背包会读到旧状态——
-          Mindcraft CE 的 /give 即此模式。查结果建议再等 getStats/inventory 就绪
+        - ``settle`` 默认 0.5s：查结果建议再等 getStats/inventory 就绪
         """
-        await self.call("input.key", {"code": GLFW_KEY_T}, timeout)
-        await asyncio.sleep(0.4)  # 等聊天框打开并获得焦点（E/T 开屏是下一帧的事）
-        await self.call("input.text", {"string": text}, timeout)
-        await asyncio.sleep(0.3)  # 等全部码点经 charTyped 入框
-        result = await self.call("input.key", {"code": GLFW_KEY_ENTER}, timeout)
-        await asyncio.sleep(settle)  # 等命令在服务器生效并同步回来
-        return result
+        async with self._command_lock:
+            await self.call("input.key", {"code": GLFW_KEY_T}, timeout)
+            if not await self._await_chat_open(timeout):
+                raise BridgeError(
+                    CODE_INVALID_RESPONSE,
+                    "T 已按下但聊天框未能打开——GUI 被其他界面占用，已拒绝盲发，"
+                    "未输入文本未按 ENTER", None)
+            await self.call("input.text", {"string": text}, timeout)
+            await asyncio.sleep(0.3)  # 等全部码点经 charTyped 入框
+            result = await self.call("input.key", {"code": GLFW_KEY_ENTER}, timeout)
+            if not await self._await_chat_closed(timeout):
+                # 发送失败：文本仍留在输入框——ESC 丢弃，防下一条命令把它拼进去
+                try:
+                    await self.call("input.key", {"code": GLFW_KEY_ESCAPE}, timeout)
+                except BridgeError:
+                    pass  # ESC 都发不出去（连接已断等）——错误以 ENTER 失败为准
+                raise BridgeError(
+                    CODE_INVALID_RESPONSE,
+                    "ENTER 已按下但聊天框未关闭——发送疑似失败，已按 ESC 丢弃"
+                    "输入框残留", None)
+            await asyncio.sleep(settle)  # 等命令在服务器生效并同步回来
+            return result
+
+    # ------------------------------------------------------------------ 命令时序确认（M4.1 T1）
+
+    async def _screen_class(self, timeout: float | None) -> str | None:
+        """getGuiState → 当前占用屏类名（``""`` = 无屏）。
+
+        ``None`` = 无法确认（身体不支持 getGuiState / 回包没有 screen_open /
+        调用失败）——调用方据此退回定时等待，绝不把"不知道"当"没屏"。
+        """
+        try:
+            result = await self.call("getGuiState", timeout=timeout)
+        except Exception:  # noqa: BLE001 —— 确认失败 = 不可确认
+            return None
+        if not isinstance(result, dict) or "screen_open" not in result:
+            return None
+        if not result.get("screen_open"):
+            return ""
+        return str(result.get("screen_class") or "unknown")
+
+    async def _await_chat_open(self, timeout: float | None) -> bool:
+        """T 之后：轮询等聊天屏出现（类名含 "Chat"，兼容命令补全等子屏）。
+
+        判定语义（M4.1 T1）：
+        - 聊天屏出现 → True；
+        - 身体不可确认（无 screen_open 字段，如 mock）→ 退回
+          ``LEGACY_OPEN_SLEEP`` 定时等待后 True（旧身体兼容）；
+        - 主线程活着（getGuiState 应答正常）却**连续无屏**——T 确实没开出
+          聊天框（罕见）→ 按旧行为放行 True（此刻无屏可吞文本，ENTER 无害）；
+        - 到时**其他 GUI 屏占着**（T 被它吃掉）→ False（调用方报错拒绝盲发）。
+        """
+        deadline = time.monotonic() + CHAT_OPEN_TIMEOUT
+        empty_polls = 0
+        occupied = False
+        while time.monotonic() < deadline:
+            screen = await self._screen_class(timeout)
+            if screen is None:
+                await asyncio.sleep(LEGACY_OPEN_SLEEP)
+                return True
+            if "Chat" in screen:
+                return True
+            if screen == "":
+                empty_polls += 1
+                if empty_polls >= 4:
+                    return True  # 应答正常却连续无屏：真没开出来，按旧行为放行
+            else:
+                occupied = True  # 有屏但不是聊天框——可能它会让位，再等等
+            await asyncio.sleep(CHAT_POLL_INTERVAL)
+        return not occupied
+
+    async def _await_chat_closed(self, timeout: float | None) -> bool:
+        """ENTER 之后：轮询等聊天屏消失（发送完成的信号）。
+
+        - 无屏 → True（已关闭）；不可确认 → 定时等待后 True；
+        - 到时**聊天屏还在** → False（发送疑似失败，调用方 ESC 清理并报错）；
+        - 到时是其他屏（ENTER 开出了别的界面等）→ True 放行（不误伤）。
+        """
+        deadline = time.monotonic() + CHAT_CLOSE_TIMEOUT
+        while time.monotonic() < deadline:
+            screen = await self._screen_class(timeout)
+            if screen is None:
+                await asyncio.sleep(LEGACY_CLOSE_SLEEP)
+                return True
+            if screen == "":
+                return True
+            await asyncio.sleep(CHAT_POLL_INTERVAL)
+        # 到时还有屏：只有"还是聊天屏"才算发送失败（其他屏/不可确认都放行）
+        screen = await self._screen_class(timeout)
+        return not (screen is not None and "Chat" in screen)
 
     # ------------------------------------------------------------------ NEKO 帧
 
@@ -485,6 +601,12 @@ class BridgeClient:
                     "ignored",
                     f"身体回错误帧（code={err.get('code')}, "
                     f"message={err.get('message')!r}）——按不支持 hello 处理")
+            elif isinstance(ack, dict) and ack.get("type") == "hello_ack":
+                # 真机 Mod 的正式回应（M1 起就回，M3.6 起识别）
+                self.hello_result = HelloResult(
+                    "acked",
+                    f"hello_ack ok={ack.get('ok')} "
+                    f"protocol_version={ack.get('protocol_version')!r}")
             else:
                 ack_type = ack.get("type") if isinstance(ack, dict) else type(ack).__name__
                 self.hello_result = HelloResult("acked", f"收到回应 type={ack_type!r}")
@@ -528,6 +650,8 @@ class BridgeClient:
             await self._handle_notification(msg)
         elif frame_type == "task_finished":
             await self._handle_task_finished(msg)
+        elif frame_type == "hello_ack":
+            await self._handle_hello_ack(msg)
         else:
             # 前向兼容：身体新增帧类型时旧客户端不崩。spec §8.2。
             logger.info("忽略无法识别的帧 type=%r（前向兼容）", frame_type)
@@ -585,6 +709,21 @@ class BridgeClient:
                     await outcome
             except Exception:  # noqa: BLE001
                 logger.exception("task_finished handler 抛错（task_id=%s）", frame.task_id)
+
+    async def _handle_hello_ack(self, msg: dict[str, Any]) -> None:
+        """hello_ack 握手回应识别（M3.6 T2）。
+
+        真机 Mod 连接后的首条入站帧——此前落入"无法识别的帧"分支记 INFO 日志；
+        现在用 HelloAckFrame 校验并 debug 记录（ack 语义早已被 _wait_hello_ack 的
+        观察 future 消费，这里只补认知缺口）。畸形帧按前向兼容忽略，绝不影响连接。
+        """
+        try:
+            frame = HelloAckFrame.model_validate(msg)
+        except ValidationError as exc:
+            logger.warning("hello_ack 帧校验失败，忽略：%s", exc)
+            return
+        logger.debug("hello_ack：ok=%s protocol_version=%s",
+                     frame.ok, frame.protocol_version)
 
     def _poke_hello(self, payload: Any) -> None:
         """hello 等待者观察第一帧（不消费帧，正常分发照旧）。"""

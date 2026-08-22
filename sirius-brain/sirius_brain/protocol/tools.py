@@ -105,6 +105,18 @@ class TextParams(BaseModel):
     string: str
 
 
+class ChatSendParams(BaseModel):
+    """chat.send({ string })。M4.1 v1.3 直发聊天——绕开 T 键 GUI 的聊天通道。
+
+    动机（操作型功能入 bridge 的又一例）：死亡屏等 GUI 打开时 T 键唤不起
+    聊天框，反射层的死亡播报经 input.* 路径必然被吞（M4-rerun §3.3：wire
+    已发、游戏聊天无此行）。bridge 侧进程内调 ClientPacketListener.sendChat
+    直接发包，与人类玩家发言完全同源。长度上限 256 与 vanilla 聊天一致。
+    """
+
+    string: str = Field(min_length=1, max_length=256)
+
+
 class EventsSubscribeParams(BaseModel):
     """events.subscribe({ types: [...], min_level })。spec §8.2。"""
 
@@ -134,6 +146,7 @@ TOOL_PARAMS: dict[str, type[BaseModel]] = {
     "input.click": ClickParams,
     "input.key": KeyParams,
     "input.text": TextParams,
+    "chat.send": ChatSendParams,
     "events.subscribe": EventsSubscribeParams,
     "events.watch": EventsWatchParams,
 }

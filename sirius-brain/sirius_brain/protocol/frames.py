@@ -85,3 +85,16 @@ class TaskFinishedFrame(BaseModel):
     status: TaskFinishedStatus
     task_id: str
     text: str
+
+
+class HelloAckFrame(BaseModel):
+    """握手回应帧：Mod → 后端 ``{"type":"hello_ack","ok":true,"protocol_version":...}``。
+
+    真机服务端 M1 起就回（Json.helloAck 实况），客户端此前当未知帧忽略并告警——
+    M3.6 补进协议建模（T2）。注意配对的 hello 请求帧仍定义在 bridge/client.py
+    （握手不属于工具调用协议，schema 导出不覆盖握手帧）。
+    """
+
+    type: Literal["hello_ack"] = "hello_ack"
+    ok: bool
+    protocol_version: str

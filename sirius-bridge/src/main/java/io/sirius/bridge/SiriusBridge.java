@@ -44,6 +44,12 @@ public class SiriusBridge {
     /** The bridge server once started (client side only; null before that). */
     private BridgeServer server;
 
+    /**
+     * M4.1 movement look switch, cached from the config at {@link #start()}
+     * (the tick pump runs before the server exists, so the flag lives here).
+     */
+    private volatile boolean movementLook = true;
+
     public SiriusBridge() {
         if (FMLEnvironment.dist != Dist.CLIENT) {
             LOGGER.info("sirius-bridge is client-only; nothing to do on dist {}", FMLEnvironment.dist);
@@ -59,8 +65,10 @@ public class SiriusBridge {
         // M3.5 v1.2 per-tick pumps: the smooth-turn controller and the dig
         // monitor advance here (main thread; no-ops when idle) - they must
         // run whether or not the server has started, so they sit BEFORE the
-        // early return, riding this same listener.
+        // early return, riding this same listener. The M4.1 movement-look
+        // pump rides along (yields to any active explicit turn).
         TurnController.onClientTick();
+        MovementLook.onClientTick(movementLook);
         DigTools.onClientTick();
         if (server != null) {
             // M2-B: the event push channel's tick sampler (danger states ~1/s,
@@ -91,6 +99,7 @@ public class SiriusBridge {
             if (!config.notes.isEmpty()) {
                 LOGGER.info("sirius-bridge: config: {}", config.notes);
             }
+            movementLook = config.movementLook;
             applyFocusPolicy(config);
             AuditLog audit = AuditLog.create(gameDir);
             server = new BridgeServer(config, audit);

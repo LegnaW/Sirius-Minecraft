@@ -1,5 +1,6 @@
 package io.sirius.bridge;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
@@ -49,6 +50,24 @@ public final class DigContracts {
      * slow enough to look natural next to M2-D's instant snaps.
      */
     public static final double DIG_AIM_TURN_SPEED_DEG_S = 300.0;
+
+    /**
+     * M3.6 T3: after a {@code broken} verdict, wait this many ticks before
+     * scanning for drop entities (50 ms/tick). The server spawns the item
+     * entities the tick the block breaks; the client sees them only after the
+     * spawn packet round trip (~1-4 ticks), so a few ticks of slack makes the
+     * empirical drop report reliable without dragging the RPC out (20 ticks =
+     * 1 s on top of a hold that already takes seconds; a {@code timeout}
+     * verdict does NOT pay this cost).
+     */
+    public static final int DROPS_WAIT_TICKS = 20;
+
+    /**
+     * M3.6 T3: item entities within this radius of the dug block CENTER count
+     * as its drops (matches the brain-side DROP_NEAR_DIG_DIST etiquette - a
+     * matching drop 4+ blocks from the dig point may be someone else's).
+     */
+    public static final double DROPS_SCAN_RADIUS = 4.0;
 
     /** Validated {@code dig} params: integer block position + optional timeout_ms. */
     public record DigParams(int x, int y, int z, int timeoutMs) {
@@ -120,10 +139,18 @@ public final class DigContracts {
      * {@code "broken_via_occluder":true} (target broke after the crosshair
      * had been chewing a DIFFERENT block - leaves in front of a trunk) and
      * {@code "reason"} for the {@code blocked_*} refusals. {@code block} is
-     * JSON null for {@code already_air}.
+     * JSON null for {@code already_air}. M3.6: {@code drops} (non-null only)
+     * attaches the empirically observed drop list to a {@code broken} verdict.
      */
     public static JsonObject digResult(String result, String block, long elapsedMs,
                                         Boolean viaOccluder, String reason) {
+        return digResult(result, block, elapsedMs, viaOccluder, reason, null);
+    }
+
+    /** Full assembly incl. the M3.6 {@code drops} array (null = omit the member). */
+    public static JsonObject digResult(String result, String block, long elapsedMs,
+                                        Boolean viaOccluder, String reason,
+                                        java.util.List<JsonObject> drops) {
         JsonObject result_ = new JsonObject();
         result_.addProperty("in_game", true);
         result_.addProperty("result", result);
@@ -139,7 +166,50 @@ public final class DigContracts {
         if (reason != null) {
             result_.addProperty("reason", reason);
         }
+        if (drops != null) {
+            JsonArray drops_ = new JsonArray();
+            drops.forEach(drops_::add);
+            result_.add("drops", drops_);
+        }
         return result_;
+    }
+
+    // ------------------------------------------------------------------ empirical drops (M3.6 T3)
+
+    /**
+     * Aggregates the dig's empirical drop report: item facts that (a) are
+     * item entities (registry id present), (b) sit within {@code radius} of
+     * the dug block center, and (c) were NOT already there when the dig
+     * started (uuid snapshot diff - a neighbouring player's drop must not
+     * ride along on our report). Counts sum per registry id, order = first
+     * appearance. Pure so the smoke test covers it without a game.
+     */
+    public static java.util.List<JsonObject> aggregateDrops(java.util.List<ToolContracts.EntityFact> facts,
+                                                            java.util.Set<String> seenBefore,
+                                                            double cx, double cy, double cz,
+                                                            double radius) {
+        double maxDistSq = radius * radius;
+        java.util.LinkedHashMap<String, Integer> sums = new java.util.LinkedHashMap<>();
+        for (ToolContracts.EntityFact fact : facts) {
+            if (fact.item() == null || seenBefore.contains(fact.uuid())) {
+                continue;
+            }
+            double dx = fact.x() - cx;
+            double dy = fact.y() - cy;
+            double dz = fact.z() - cz;
+            if (dx * dx + dy * dy + dz * dz > maxDistSq) {
+                continue;
+            }
+            sums.merge(fact.item(), Math.max(1, fact.count()), Integer::sum);
+        }
+        java.util.List<JsonObject> drops = new java.util.ArrayList<>();
+        for (java.util.Map.Entry<String, Integer> entry : sums.entrySet()) {
+            JsonObject drop = new JsonObject();
+            drop.addProperty("item", entry.getKey());
+            drop.addProperty("count", entry.getValue());
+            drops.add(drop);
+        }
+        return drops;
     }
 
     // ------------------------------------------------------------------ monitor state machine

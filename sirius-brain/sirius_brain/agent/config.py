@@ -183,6 +183,12 @@ class LoopConfig:
     # （M3 砍树 22 步 → 目标 ≤4 步），200k 会在复杂探索任务上误伤；500k 作为
     # 复杂探索任务的硬上限，仍能兜住失控循环
     max_total_tokens: int = 500_000
+    # M4 反射等级默认值：observer（L0 关动作不关感知）/ self_preserve（L1 默认，
+    # 七条反射全开）/ guard（L2 预留枚举位，配置了也只在切换时被拒）。
+    # 聊天切换命令只改内存不落盘——重启回这里的默认值（刻意：简单优先）
+    reflex_level: str = "self_preserve"
+    # M4 反射调度器轮询间隔（秒）：Numen CompanionBrain 的 0.5s 移植值
+    reflex_poll_interval: float = 0.5
 
     def __post_init__(self) -> None:
         if self.max_steps < 1:
@@ -191,6 +197,12 @@ class LoopConfig:
             raise ValueError(f"min_interval 须 >= 0，got {self.min_interval}")
         if self.max_total_tokens <= 0:
             raise ValueError(f"max_total_tokens 须 > 0，got {self.max_total_tokens}")
+        if self.reflex_level not in ("observer", "self_preserve", "guard"):
+            raise ValueError(
+                f"reflex_level 须为 observer/self_preserve/guard，got {self.reflex_level!r}")
+        if self.reflex_poll_interval <= 0:
+            raise ValueError(
+                f"reflex_poll_interval 须为正数，got {self.reflex_poll_interval}")
 
 
 @dataclass

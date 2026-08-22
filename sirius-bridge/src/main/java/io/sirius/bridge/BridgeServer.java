@@ -125,6 +125,7 @@ public final class BridgeServer extends WebSocketServer {
         InputTools.registerAll(tools, guard);
         LookTools.registerAll(tools, guard);
         DigTools.registerAll(tools, guard); // M3.5 v1.2: intelligent dig primitive (shares the guard)
+        ChatTools.registerAll(tools, guard); // M4.1 v1.3: direct chat send (death-screen-safe broadcasts)
         GuiTools.registerAll(tools);
         tools.register("events.subscribe", this::subscribeEvents);
     }

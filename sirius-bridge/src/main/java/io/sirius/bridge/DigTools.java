@@ -8,6 +8,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
@@ -44,10 +48,17 @@ import java.util.concurrent.CountDownLatch;
  *       occluder tolerance, destroy-stage telemetry early-stop, insta-mine
  *       short press, overall {@code timeout_ms} - and releases the moment
  *       the monitor finishes.</li>
- *   <li><b>Response</b>: {@code {result, block, elapsed_ms,
- *       broken_via_occluder?, reason?}} - the brain maps each result to a
- *       teaching phrase verbatim.</li>
- * </ol>
+     *   <li><b>Response</b>: {@code {result, block, elapsed_ms,
+     *       broken_via_occluder?, reason?, drops?}} - the brain maps each
+     *       result to a teaching phrase verbatim. M3.6: a {@code broken}
+     *       verdict additionally waits {@link DigContracts#DROPS_WAIT_TICKS}
+     *       ticks and reports the item entities that appeared within
+     *       {@link DigContracts#DROPS_SCAN_RADIUS} of the dug block
+     *       (pre-dig snapshot diffed) as {@code drops:[{item,count}]} -
+     *       empirical drop knowledge instead of a hard-coded drop table
+     *       (modded blocks included), which is also why the brain's pickup
+     *       matching prefers this list over registry-id guessing.</li>
+     * </ol>
  *
  * <p><b>Why the ACTION layer for the hold (not input.click's event layer):</b>
  * vanilla's continuous destroy is double-gated on OS focus:
@@ -163,12 +174,92 @@ final class DigTools {
         String result = completed && dig.result != null ? dig.result : DigContracts.RESULT_TIMEOUT;
         long elapsedMs = completed ? dig.elapsedMs() : System.currentTimeMillis() - startedMs;
         boolean viaOccluder = completed && dig.viaOccluder;
+        // M3.6 T3: empirical drops. Only a broken verdict pays the wait, and
+        // only while the dig budget has a second to spare (breaking in the
+        // last second of the window means the brain's own RPC timeout - 30 s
+        // by default - could race the extra wait; the report is best-effort,
+        // an old-jar-shaped response without drops beats a timed-out one).
+        java.util.List<JsonObject> drops = null;
+        if (completed && DigContracts.RESULT_BROKEN.equals(result)
+                && elapsedMs < p.timeoutMs() - DigContracts.DROPS_WAIT_TICKS * 50L) {
+            drops = dropsAfterBreak(ctx, dig);
+        }
         JsonObject response = DigContracts.digResult(result, dig.blockId, elapsedMs, viaOccluder,
-                completed ? dig.note : "monitor did not finish (window iconified? self-cleans next tick)");
+                completed ? dig.note : "monitor did not finish (window iconified? self-cleans next tick)",
+                drops);
         ctx.audit("INPUT", "method=dig " + summary + " timeout_ms=" + p.timeoutMs()
                 + " result=" + result + (viaOccluder ? " via_occluder=true" : "")
-                + " elapsed_ms=" + elapsedMs);
+                + " elapsed_ms=" + elapsedMs
+                + (drops != null ? " drops=" + drops.size() : ""));
         return Json.okResponse(ctx.id(), response);
+    }
+
+    /**
+     * M3.6 T3: the empirical drop report for a broken block. Sleeps
+     * {@link DigContracts#DROPS_WAIT_TICKS} ticks (the server spawns the item
+     * entities on break; the client sees them a few packets later) and then
+     * snapshots - diffed against the dig's pre-start snapshot - the item
+     * entities within {@link DigContracts#DROPS_SCAN_RADIUS} of the dug
+     * center. Sleeping here runs on the connection's handler thread: dig is
+     * a synchronous RPC and the brain drives it serially, so a bounded 1 s
+     * tail is the simplest correct pacing.
+     *
+     * @return the aggregated {@code [{item,count}]} list, or null when the
+     *         wait was interrupted / world left (caller omits the member -
+     *         brain falls back to registry-id matching, old-jar semantics).
+     */
+    private static java.util.List<JsonObject> dropsAfterBreak(ToolContext ctx, ActiveDig dig) {
+        try {
+            Thread.sleep(DigContracts.DROPS_WAIT_TICKS * 50L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+        java.util.List<ToolContracts.EntityFact> facts;
+        try {
+            facts = PerceptionTools.callOnMainThread(ctx, () -> itemFactsNear(dig.target));
+        } catch (Exception e) {
+            // Best-effort report: any failure omits the member - the brain then
+            // falls back to registry-id matching (old-jar semantics), so a flaky
+            // observation can never fail an already-successful dig.
+            return null;
+        }
+        if (facts == null) {
+            return null;
+        }
+        return DigContracts.aggregateDrops(facts, dig.dropsSeenBefore,
+                dig.target.getX() + 0.5, dig.target.getY() + 0.5, dig.target.getZ() + 0.5,
+                DigContracts.DROPS_SCAN_RADIUS);
+    }
+
+    /**
+     * Item-entity facts near the dug block (main thread). The same reading
+     * path world.query(entities) uses (EntityFact + registry id), restricted
+     * to ItemEntity - everything else is irrelevant to the drop report.
+     */
+    private static java.util.List<ToolContracts.EntityFact> itemFactsNear(BlockPos target) {
+        Minecraft mc = Minecraft.getInstance();
+        ClientLevel level = mc.level;
+        if (level == null) {
+            return null;
+        }
+        java.util.List<ToolContracts.EntityFact> facts = new java.util.ArrayList<>();
+        for (Entity entity : level.entitiesForRendering()) {
+            if (entity.isRemoved() || !(entity instanceof ItemEntity itemEntity)) {
+                continue;
+            }
+            ItemStack stack = itemEntity.getItem();
+            var itemId = BuiltInRegistries.ITEM.getKey(stack.getItem());
+            facts.add(new ToolContracts.EntityFact(
+                    entity.getStringUUID(),
+                    entity.getName().getString(),
+                    EntityType.getKey(entity.getType()).toString(),
+                    entity.getX(), entity.getY(), entity.getZ(),
+                    Float.NaN,
+                    itemId != null ? itemId.toString() : "unknown",
+                    stack.getCount()));
+        }
+        return facts;
     }
 
     private static JsonObject finish(ToolContext ctx, String method, String summary,
@@ -226,12 +317,33 @@ final class DigTools {
         }
 
         boolean instaMine = state.getDestroyProgress(player, level, target) >= 1.0F;
+        // M3.6 T3: pre-dig snapshot of the item entities already near the
+        // target - the drop report diffs against it so a neighbouring (foreign)
+        // drop never rides along as "what my dig produced".
+        java.util.Set<String> dropsSeenBefore = itemUuidsNear(level, target);
         // Smooth aim at the block center (300 deg/s); supersedes any active turn.
         double[] rotation = LookContracts.rotationTowards(
                 eye.x, eye.y, eye.z, center.x, center.y, center.z);
-        ActiveDig dig = installMonitor(target, blockName, p.timeoutMs(), instaMine);
+        ActiveDig dig = installMonitor(target, blockName, p.timeoutMs(), instaMine, dropsSeenBefore);
         dig.turn = TurnController.begin(rotation[0], rotation[1], DigContracts.DIG_AIM_TURN_SPEED_DEG_S);
         return new StartOutcome(STARTED, null, blockName, null, instaMine, dig);
+    }
+
+    /** uuids of the item entities within the drop scan radius of (x,y,z). */
+    private static java.util.Set<String> itemUuidsNear(ClientLevel level, BlockPos target) {
+        double cx = target.getX() + 0.5, cy = target.getY() + 0.5, cz = target.getZ() + 0.5;
+        double maxDistSq = DigContracts.DROPS_SCAN_RADIUS * DigContracts.DROPS_SCAN_RADIUS;
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (Entity entity : level.entitiesForRendering()) {
+            if (entity.isRemoved() || !(entity instanceof ItemEntity)) {
+                continue;
+            }
+            double dx = entity.getX() - cx, dy = entity.getY() - cy, dz = entity.getZ() - cz;
+            if (dx * dx + dy * dy + dz * dz <= maxDistSq) {
+                seen.add(entity.getStringUUID());
+            }
+        }
+        return seen;
     }
 
     /** First liquid-holding neighbour of the target, or null ("water at (x,y,z)"). */
@@ -273,6 +385,8 @@ final class DigTools {
         final BlockPos target;
         final String blockId;
         final long startedMs;
+        /** M3.6: item-entity uuids near the target BEFORE the dig (drop diff base). */
+        final java.util.Set<String> dropsSeenBefore;
         final CountDownLatch done = new CountDownLatch(1);
         /** The aim turn currently owned by this dig (re-issued on drift; null before the first). */
         TurnController.Turn turn;
@@ -280,11 +394,13 @@ final class DigTools {
         volatile boolean viaOccluder;
         volatile String note;
 
-        ActiveDig(DigContracts.DigMonitor monitor, BlockPos target, String blockId, long startedMs) {
+        ActiveDig(DigContracts.DigMonitor monitor, BlockPos target, String blockId, long startedMs,
+                  java.util.Set<String> dropsSeenBefore) {
             this.monitor = monitor;
             this.target = target;
             this.blockId = blockId;
             this.startedMs = startedMs;
+            this.dropsSeenBefore = dropsSeenBefore;
         }
 
         long elapsedMs() {
@@ -305,14 +421,15 @@ final class DigTools {
      * Installs a new dig (returning the handle the caller waits on),
      * superseding (and stopping) any active one. Main thread only.
      */
-    private static ActiveDig installMonitor(BlockPos target, String blockId, int timeoutMs, boolean instaMine) {
+    private static ActiveDig installMonitor(BlockPos target, String blockId, int timeoutMs,
+                                            boolean instaMine, java.util.Set<String> dropsSeenBefore) {
         if (active != null) {
             release(Minecraft.getInstance());
             active.complete(DigContracts.RESULT_NOT_DIGGING, active.monitor.sawOccluder(), "superseded by another dig");
             active = null;
         }
         ActiveDig dig = new ActiveDig(new DigContracts.DigMonitor(timeoutMs, instaMine), target, blockId,
-                System.currentTimeMillis());
+                System.currentTimeMillis(), dropsSeenBefore);
         active = dig;
         return dig;
     }

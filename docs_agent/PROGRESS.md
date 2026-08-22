@@ -2,9 +2,9 @@
 
 > 本文档是**跨会话的状态锚点**：每轮工作结束时更新，新会话从这里恢复上下文。
 > 设计内容不写这里（在 [sirius-design.md](../docs_human/sirius-design.md) / [sirius-technical.md](./sirius-technical.md)），这里只记"做到哪了、接下来干什么"。
-> 最后更新：2026-08-20
+> 最后更新：2026-08-21
 
-## 当前阶段：M3.5（智能优化轮）**已完成**——运动控制从 VLM 下沉确定性代码（任务级原语 + Baritone 集成 + bridge dig 智能挖掘），真机闭环验证通过（砍树 22 步 212k → 4 步 16k）；待启动 M4（**反射层为主**，寻路已由 Baritone 集成解决）
+## 当前阶段：M4.1（反射层独立存活修复轮）**已完成**——五缺陷修复（命令锁下沉/移动转头/chat.send 直发/令牌桶证伪/#pause 配对）+ 分段存活压测 3 PASS·2 DEATH 全归因 + 协议 1.2→1.3；pytest 351 / 冒烟 369 全绿。**等用户反馈决定下一轮**（候选：M5 分层大脑 / L2 战斗 / 进食反射小轮）
 
 ## 已完成
 
@@ -57,6 +57,41 @@
 - [x] **T5b 直驱验收达标**：问候 1.6s；砍橡木 4 步 8.0s 16k tokens（对比 M3-C 同意图 22 步 212k 预算耗尽——步数 1/5.5、token 1/13，验收线 ≤4 次/≤30k）；完整聊天循环验收待用户进世界
 - [x] **架构裁决 4 项**（见下方决策表 2026-08-20 行）：Baritone 集成、操作型功能入 bridge、拾取 VLM 可配置、本地 LM Studio VLM 可用
 
+## M3.6 完成记录（2026-08-20，小补丁轮；代码已提交 783558e，本记录为 M4 收尾时补登——上轮 PROGRESS 漏更）
+
+- [x] **T1 幻觉直答防护**：系统提示新增"观察纪律（防幻觉直答）"节（答案取决于世界状态的问题必须先调感知工具；闲聊/知识问答/引用既有工具结果的汇报豁免——避免"你好"也触发查询）
+- [x] **T2 hello_ack 协议建模**：`HelloAckFrame` + 客户端识别（连接日志不再出"忽略无法识别的帧"WARNING）；只进 frames.py 不进 schema 导出（握手帧从不导出），协议版本不动 1.2
+- [x] **T3 dig 经验掉落报告 + pickup 工具**：bridge dig broken 后 20 tick 快照 diff 附 `drops`（**经验主义掉落知识，模组方块零硬编码**；挖前 uuid 快照保证别人的掉落绝不混入）；brain `_collect_drops` 优先用 drops 匹配；`pickup` 注册 VLM 工具（注册表 14→15，Numen collect_items 语义+多人服礼仪话术）
+- 测试：pytest 302→**311**、冒烟 345→**350**、真机 3/3（穿遮挡聚合 dirt×3、诚实空清单、礼仪实证不捡他人树苗）；报告 reports/M3.6.md（注：session/2026-08-20-M3.6.md 收尾日志仍空，事实以报告与提交信息为准）
+
+## M4 完成记录（2026-08-20，反射层：等级框架 + L0/L1）
+
+核心主张：**脊髓不过大脑**——溺水/着火/危怪/卡位的保命动作在确定性代码里完成，零 VLM token；认知层只收事后简报。spec 见 session/2026-08-20-M4.md，全轮报告 reports/M4.md（含三处偏差与已知限制）。
+
+- [x] **等级框架**：`ReflexLevel` 严格单调能力束（L0 观察 ⊂ L1 自保默认 ⊂ L2 自卫预留枚举位）；切换=聊天"反射等级 观察/自保"人类-only（不进 VLM 工具表，识别即切换+播报）；不持久化（重启回默认）；`instincts_section` 按等级动态生成系统提示节——代码层与认知层唯一同步点
+- [x] **调度器**（`agent/reflexes.py`，Numen CompanionBrain 的 asyncio 移植）：0.5s 轮询协程，按注册序问 `can_run` 首个胜出（层内单候选，结构性消灭比较）；三档打断 none（旁路）/cooperative（接管归还，任务不停）/preempt（经 `request_preempt` 掀任务，end_reason=preempt 不播报）；边沿自持（触发窗/冷却/死亡闩+复活重臂）；先归位再宣布（act 结束才写 behavior_log）；等级门控在调度循环、danger 感知不门控（L0 关动作不关感知）
+- [x] **L1 七反射**：换气（air≤240 按 SPACE 上浮，失败封顶上报）/脱困（2s 位移<0.75 → 137° 扇形爆发+跳）/撤离（#stop+20 格找水否则反向撤 5 格）/低血（#stop+警报+〔紧急〕）/死亡（报坐标+等玩家指令不自动重生）/危怪逃离（category=monster 进危险半径 width/2+1.5 → 反向 8 格，不还击）/说话注视（播报窗口内 lookAt 最近玩家）
+- [x] **事后知会（非记忆）**：behavior_log（deque 纯消息）每轮 VLM 前替换式 flush 一条〔本能反应〕（尾 500 字符）；death/低血走 `inject_urgent` 排队 drain〔紧急〕（任务死了留给下一任务）；零持久化零检索——范围红线（本轮零记忆/零认知接口）遵守
+- [x] **bridge**：entities 载荷加 `category`（MobCategory 注册表小写，模组怪自动归 monster）+ `width`（碰撞箱宽，flee 危险半径输入）——纯增字段协议不动 1.2，旧构造器 null/0 兜底
+- [x] **真机验收（零 VLM token）**：换气（air 300→217 触发，SPACE×4 回满；困水下封顶上报也实测）/死亡×3（聊天报坐标+"不会自动重生"，死亡屏保持）/低血（health 1.86→#stop+警报+urgent）/逃离（末影人 0.47 格<1.8 半径→#stop+反向 8 格+简报未还击）/等级切换（L0↔L1+L2 拒绝；L0 下 fire 照进认知零动作）/entities payload（monster/misc/water_ambient）/Baritone 200 格（199 格 77s 终点差 1.2 格，途中零误触发）。着火/脱困环境受限未真机（无火源/无卡位点，单测覆盖+触发通道是 M2-B 已验的 CRITICAL 事件）
+- [x] **真机暴露并修复**：死亡时 breath/unstuck/flee 不再动作（溺尸按 SPACE 刷 18 次简报教训——dead 门控）；修复后全量重跑绿
+- 测试：pytest 311→**339**（+28）、冒烟 350→**353**（+3）
+
+## M4.1 完成记录（2026-08-21，反射层独立存活 + 自然转头修复轮）
+
+核心使命：①机器人零上层指令输入下完全靠反射层**尽量**不死（诚实口径：记录归因而非承诺零死亡）②移动自然转头（消灭固定视角平移）。spec 见 session/2026-08-21-M4.1.md（含用户修正的分段压测验收），全轮报告 reports/M4.1.md + M4.1-progress.md（五缺陷根因/两个预设假设被推翻/压测归因表/计划外第 6 修复 safe_command）。
+
+- [x] **T1 命令竞态（🔴）**：根因两层——探针 raw `BridgeClient` 的 Primitives 与调度器并发（锁只在 LoopClient 级）+ `command()` 时序全靠拍定时数。修复：锁下沉 `BridgeClient.command` 客户端级（锁序 loop→client 无死锁）+ GUI 确认时序（T 后等聊天屏开——被占用拒绝盲发；ENTER 后等关闭——关不掉 ESC 丢弃）。真机 10 条 #stop/#goto 连发 5.19s 零合并、位移 14.9 格
+- [x] **T2 移动转头（🔴）**：**TurnController 压制说被证据推翻**（130 格长走审计零旋转写入）——真因是 Baritone（该 standalone 构建）行走自身不转头（WASD 平移）。修复：bridge `MovementLook` 每 tick 按速度矢量方向 300°/s 只写 yaw（显式 turn 优先让位、2° 死区、pitch 不碰、config movement_look 可关）。真机 43 样本 |yaw−运动方向| 中位 0°/P90 8°/max 16°
+- [x] **T3 死亡播报（🟡）**：bridge 新工具 `chat.send`（进程内 `ClientPacketListener.sendChat`，死亡屏免疫）+ brain `LoopClient.say`（旧 jar -32601 自动回落）；Death/低血警报改直发（压测实证"低血警报发出前毫秒级死亡、死亡屏吞 T 键"窗口期）。上轮"播报×3"复查结论：M4.md 验的是 wire 层，聊天可见性是时序侥幸。端到端实证：死亡屏开着播报真实进聊天且不自动重生
+- [x] **T4 令牌桶（🟡）**：**"长按按 tick 计费"说被证伪**——源码全 `tryAcquire(1)` 按调用计费，真机 1500ms 长按+19 并发 tap 19/19 全过；-32010 真因是演示脚本自身管道化并发。**裁决：无需改码**（反射层 await 串行 ≤2/s 无风险）
+- [x] **T5 cooperative×Baritone（🟢）**：`#pause`/`#resume` 配对（仅 movement_active 时 pause；preempt 已 #stop 后 #resume 无害空操作；幂等+失败只记日志）——优于 #stop+不重启（保住 walk 续走语义）。真机 Baritone 回执实证
+- [x] **T6 分段存活压测（用户修正验收：分段制+饱和消除饥饿）**：五场景各 120s 零任务消费——火 PASS / 卡位 PASS / 综合混灾 PASS（最低 7.7 存活）；怪群 DEATH t=20s（**设计边界非缺陷**：L1 禁攻击+逃离冷却 6s，反射链全部正确仍死——L2 战斗是真正解）；深水首轮 DEATH t=74s（占空比缺陷：400ms 按/500ms 歇净上浮≈0）→ BREATH_PRESS_MS 400→800 修后回归 PASS（换气×14、最低 4.3 存活）
+- [x] **压测引出第 6 修复 safe_command**：低血 #stop 被 GUI 占用拒绝（-32002）抛异常会跳过直发警报与 urgent 注入——preempt 反射 #stop 统一走 `safe_command`（失败只记日志，保命链不被单条命令打断）
+- [x] **附带**：着火/卡位为此前"环境受限未真机"的补验（M4 遗留销项）；GUI 重生点击×2；探针 GUI 自动化开 LAN+作弊（世界原作弊关闭）
+- 测试：pytest 339→**351**（+12）、冒烟 353→**369**（+16）；协议 1.2→**1.3**（chat.send + getStats yaw/pitch，三处同步）
+
+
 ## M2 完成记录（2026-08-19，D 盘机收口）
 
 - [x] **M2-B 事件订阅推送**：EventPusher 单一事件入口（chat/gui_open/gui_close + 危险态 death/fire/health_low/drown 状态沿+5s 冷却）；events.subscribe per-connection 订阅（原子 seq）；截图推流（~1Hz 采样/6s 节流最新帧待发+边界补发/质量×边长双阶梯 100KB 硬预算/环形 3）；诚实丢弃计数。冒烟 119→175；真机 PASS（10 帧 seq 单调/预算内）。借鉴 N.E.K.O 生产管线（service.py:1037-1307）
@@ -108,25 +143,43 @@
 | 2026-08-19 | **NEKO 协议兼容层取消**：N.E.K.O 是独立项目（自有感知/思维链路），降为纯设计参考；任务帧保留在协议但不作兼容承诺 |
 | 2026-08-19 | **Bridge=哑管道**：只上报/接受信息，一切处理归 brain；API key 只配 local.md 一遍（排查确认 bridge 无 VLM 代码/无出站 HTTP，无需删码） |
 | 2026-08-19 | **反射层归 brain**（原 §8.3 规划在 bridge 轨）：Python 无 LLM 规则消费 M2-B 的 CRITICAL 危险事件；寻路同理 brain 侧 |
-| 2026-08-20 | **协议分拆**：sirius-bridge → LGPL-3.0（参考 Numen 实现+借用 Baritone，Numen 为 LGPL-3.0 按传染性要求同协议开源；LICENSE 落 sirius-bridge/）；sirius-brain 保持 Apache-2.0（根 LICENSE 不变） | 用户裁决（防纠纷） |
+| 2026-08-20 | **协议分拆**：sirius-bridge → LGPL-3.0（参考 Numen 实现+借用 Baritone，Numen 为 LGPL-3.0 按传染性要求同协议开源；LICENSE 落 sirius-bridge/）；sirius-brain 保持 Apache-2.0（根 LICENSE 不变）。用户裁决，防纠纷 |
 | 2026-08-19 | **M3 方案定稿**：qwen3.7-plus 单模型；原生 tool-calling；结构化感知优先+按需截图；mock 双人先行、真机 LAN 收官 |
 | 2026-08-20 | **寻路 = Baritone 集成**（不自研 A*）：#goto/#stop 聊天命令驱动（客户端拦截，不达服务器），真机冒烟 3s 收敛 2.0 格；M4 寻路里程碑收窄为反射层 |
 | 2026-08-20 | **操作型功能入 bridge、对 brain 暴露接口**：dig/look 动作层先例（事件层长按被 vanilla 焦点双门控废掉，M2-D 同构）；bridge 边界由"哑管道"两层修订为"感知原语化 + 输入标准化 + 动作层操作原语"三层（sirius-technical §8.3） |
 | 2026-08-20 | **拾取行为 VLM 可配置**：collectBlock pickup 参数（默认顺路捡匹配掉落，挖通道/清地形传 false）——意图层决策留 LLM、执行下沉代码 |
 | 2026-08-20 | **VLM 可用本地 LM Studio 模型**（reasoning_effort:"none" 为本地关思考唯一有效开关，32k 上下文；部署细节见各机 local.md） |
+| 2026-08-20 | **反射等级体系 = 三级严格单调能力束**（L0 观察 ⊂ L1 自保默认 ⊂ L2 自卫预留）：不做每条反射的开关（Numen 删空闸教训）；L2 客户端战斗模块后置独立轮次（接入需同步修订"禁止攻击"安全约束）；升攻击等级人类-only（聊天"反射等级"命令，不进 VLM 工具表）。用户裁决 |
+| 2026-08-21 | **分段压测制裁决**（用户修正 M4.1 验收）：连续 10 分钟跑会被饥饿拖死（资源约束非反射层缺陷）——改为五场景各 120s 独立压测 + 场景前 instant_health/saturation 效果消除饥饿变量 + 死亡即记归因（"尽量不死"诚实口径：记录死因而非承诺零死亡） |
+| 2026-08-21 | **反射层职责边界声明**（压测归因固化）：职责 = 突发危险的即时自救（溺水/着火/围攻/卡位）；慢性消耗（饥饿/长期低饱食）不在职责内——进食反射记 backlog（检测饥饿+库存有食物自动吃，L1 未来成员，执行器层协作，M4.2/M5 候选） |
 
 ## 遗留问题 / 待用户输入
 
+### M4 遗留（本轮新增）
+
+- **L2（guard）战斗模块**：枚举位+instincts 预留节已就位；实现后置独立轮次（客户端战斗是最难件；接入需 ①战斗反射链 ②同步修订"禁止攻击"安全约束 ③切换放行 ④消费 entities health 字段）。**M4.1 压测显性化：这是怪群存活的真正解**——裸装无武器 bot 被 5 只怪轮番贴身时反射链全部正确仍死（L1 禁攻击设计边界+逃离冷却 6s 期间再次贴身），归因见 reports/M4.1.md §2
+- **进食反射**（M4.1 新增 backlog）：检测饥饿+库存有食物→自动吃——L1 合理未来成员，属执行器层协作范畴（M4.2/M5 候选）；M4.1 压测以饱和效果消除了该变量
+- **多人补验**：等级切换聊天命令端到端（单机无第二玩家，bot 自回显过滤——命令解析单测覆盖、切换执行路径真机已验）+ speaking_look 有对象
+- ~~**着火/脱困真机补测**：需火源（开作弊测试世界/岩浆/打火石）与可复现卡位点~~ **已解决（M4.1 T6 压测补验：火 PASS/卡位 PASS——探针 GUI 自动化开 LAN+作弊后点火与造坑）**
+- **调度分层候选**：health_low/death 的"上报"与撤离的"行走"同层串行（单候选）——追击场景低血上报被撤离行走阻塞 ~10s（M4.1 safe_command 已消"上报被打断"风险，阻塞本身仍在）
+- **flee 危险半径对远程怪保守**（width/2+1.5 是近战近似，骷髅 30 格外射死不触发；低血反射是实际兜底）
+- **fire 再触发依赖新 CRITICAL 事件**（bridge 5s 边沿冷却）：撤离后仍在烧且无新边沿不会二次撤离
+- **等级切换不持久化**（重启回 self_preserve）；**反射保护以 agent 进程常驻为前提**（真机两次死亡发生在探针间隙——调度器未挂，产品语义内）
+- **NEKO 危险记忆/认知接口**：M4 范围红线未做；behavior_log（现 deque 纯消息）是将来危险记忆的天然挂点（M6+）
+- 次项未动：Baritone 注入路径优化（#goto 聊天往返 ~1.3s/次）
+- 真机运维：游戏窗口最小化时 mouseMove 全废（screenWidth=0）——恢复/重启前先 PowerShell `ShowWindow(SW_RESTORE)`
+
+### 老项（跨轮）
+
 - 旧 `mindcraft-ce-develop\` 本体（E 盘已有副本的原始位置）是否删除待定
-- ~~M4 前决策：Baritone 依赖 vs 自研寻路~~ **已决（2026-08-20）：Baritone 集成**；M4 范围收窄为反射层为主（Baritone 注入路径优化——#goto 聊天往返 1.3s/次——为次项）
 - M5 前决策：执行器①是否引入 Numen 式确定性任务
 - 模型选型（规划器/执行器具体型号）未定
-- 本地 VLM 观察类问题不调工具直接幻觉作答 → M4 系统提示硬约束
-- 掉落物匹配为精确 id（stone→cobblestone 不命中，需掉落表知识）→ M4 再议（当前保守不捡恰好符合多人服礼仪）
-- pickup() 原语未暴露给 VLM（真机已验证可用，注册只需 tools.py 加条目）→ M4 注册表层再议
-- 无 filter 的 world.query 仍是 v1.0 cap-before-sort 截断语义（brain 侧已防御、filter 路径已修）→ M4 观察项，根治属协议语义变更
+- 无 filter 的 world.query 仍是 v1.0 cap-before-sort 截断语义（brain 侧已防御、filter 路径已修）→ 观察项，根治属协议语义变更
 - input.click 事件层长按 / input.mouseMove 转头仍需窗口焦点（vanilla 门控无开关；"AI 播放"标准部署=游戏窗口保持前台，sirius-bridge/README 已记）
 - 多人服在线复验待用户开服（T7 单机 4/4，礼仪约束由代码+单测钉死）
-- T5b 完整聊天循环验收待用户进世界（直驱两任务已过）
-- hello_ack 未建模（P1 老项，功能不影响）
 - collect 16.8s/3 根的下一步提速在换斧/执行器（M5），不在本层
+- ~~本地 VLM 观察类问题不调工具直接幻觉作答~~ **已解决（M3.6 T1 观察纪律节）**
+- ~~掉落物匹配为精确 id（需掉落表知识）~~ **已解决（M3.6 T3 dig 实测 drops 取代掉落表，模组方块零硬编码）**
+- ~~pickup() 原语未暴露给 VLM~~ **已解决（M3.6 T3 注册，工具表 14→15）**
+- ~~hello_ack 未建模~~ **已解决（M3.6 T2 HelloAckFrame）**
+- ~~T5b 完整聊天循环验收待用户进世界~~ **已过（M3.5 收官时用户实测通过，见 M3.6 session 背景）**

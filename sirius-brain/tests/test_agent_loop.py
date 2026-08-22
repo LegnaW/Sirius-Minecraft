@@ -25,6 +25,7 @@ from sirius_brain.agent import (
     DIG_BLOCK_TOOL,
     FINISH_TOOL,
     PARTIAL_DONE_PREFIX,
+    PICKUP_TOOL,
     STATUS_PREFIX,
     STOP_REPLY_TEXT,
     WALK_TO_TOOL,
@@ -192,11 +193,11 @@ class TestToolRegistry:
         assert registry.names() == [
             "getStats", "getGuiState", "world.query", "screenshot", "lookAt",
             "input.mouseMove", "input.click", "input.key", "input.text",
-            WALK_TO_TOOL, DIG_BLOCK_TOOL, COLLECT_BLOCK_TOOL,
+            WALK_TO_TOOL, DIG_BLOCK_TOOL, COLLECT_BLOCK_TOOL, PICKUP_TOOL,
             "command", FINISH_TOOL,
         ]
         tools = registry.openai_tools()
-        assert len(tools) == 14
+        assert len(tools) == 15
         for tool in tools:
             assert tool["type"] == "function"
             function = tool["function"]
@@ -230,6 +231,18 @@ class TestToolRegistry:
         assert collect["parameters"]["properties"]["count"] == {
             "type": "integer", "minimum": 1, "maximum": 64,
             "description": "要挖除的目标方块数"}
+        # M3.6：pickup 注册在表，Numen collect_items 式契约 + 多人服礼仪话术
+        pickup = functions[PICKUP_TOOL]
+        assert "掉落物" in pickup["description"]
+        assert "多人服礼仪" in pickup["description"]            # 只捡自己活动的掉落
+        assert "磁吸" in pickup["description"]                  # 机制说明
+        pickup_props = pickup["parameters"]["properties"]
+        assert pickup_props["item_ids"]["minItems"] == 1
+        assert pickup_props["item_ids"]["maxItems"] == 8
+        assert pickup_props["radius"] == {
+            "type": "integer", "minimum": 1, "maximum": 32,
+            "description": "搜索半径（格），默认 12"}
+        assert pickup["parameters"]["required"] == []           # 全部可选（缺省=捡全部）
 
     def test_primitive_params_validation_client_side(self):
         """原语参数边界在本地 pydantic 就拒绝（不浪费 bridge 往返）。"""
@@ -248,11 +261,22 @@ class TestToolRegistry:
         with pytest.raises(ValidationError):
             asyncio.run(registry.execute(None, COLLECT_BLOCK_TOOL,
                                          {"block_ids": ["a"], "count": 65}))   # count 上限
+        # M3.6：pickup 参数边界（item_ids ≤8 条、radius 1..32）
+        with pytest.raises(ValidationError):
+            asyncio.run(registry.execute(None, PICKUP_TOOL,
+                                         {"item_ids": ["a"] * 9}))             # >8 条
+        with pytest.raises(ValidationError):
+            asyncio.run(registry.execute(None, PICKUP_TOOL,
+                                         {"item_ids": [], "radius": 12}))      # 空列表
+        with pytest.raises(ValidationError):
+            asyncio.run(registry.execute(None, PICKUP_TOOL, {"radius": 0}))    # 下界
+        with pytest.raises(ValidationError):
+            asyncio.run(registry.execute(None, PICKUP_TOOL, {"radius": 33}))   # 上界
 
     def test_default_registry_cancel_optional(self):
         """default_registry(cancel=None) 向后兼容（独立使用/测试不可取消）。"""
         registry = default_registry()
-        assert WALK_TO_TOOL in registry and len(registry) == 14
+        assert WALK_TO_TOOL in registry and len(registry) == 15
 
     def test_parameters_from_frozen_schema_files(self):
         registry = default_registry()
@@ -594,7 +618,7 @@ class TestRunTask:
                 prompt = vlm.captured[0][0]["content"]  # 首条 system 消息
                 # 任务级原语优先 + 键鼠兜底的分层引导
                 assert "任务级原语优先" in prompt
-                for name in (WALK_TO_TOOL, DIG_BLOCK_TOOL, COLLECT_BLOCK_TOOL):
+                for name in (WALK_TO_TOOL, DIG_BLOCK_TOOL, COLLECT_BLOCK_TOOL, PICKUP_TOOL):
                     assert name in prompt
                 assert "兜底" in prompt
                 # 边界契约
@@ -605,6 +629,14 @@ class TestRunTask:
                 assert "gui-scaled" in prompt
                 assert "#tag" in prompt
                 assert "Baritone" in prompt
+                # M3.6 观察纪律（幻觉防护）：世界现状必查工具，闲聊/知识问答豁免
+                assert "观察纪律" in prompt
+                assert "当前世界状态" in prompt
+                assert "禁止凭记忆" in prompt
+                assert "感知工具" in prompt
+                assert "闲聊" in prompt
+                assert "知识问答" in prompt
+                assert "工具结果" in prompt                        # 汇报引用豁免
                 # 安全约束节保留
                 assert "禁止攻击任何玩家或实体" in prompt
                 assert "当前任务" in prompt and "测试提示" in prompt

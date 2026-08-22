@@ -57,6 +57,8 @@ FINISH_TOOL = "finish"
 WALK_TO_TOOL = "walkTo"
 DIG_BLOCK_TOOL = "digBlock"
 COLLECT_BLOCK_TOOL = "collectBlock"
+# M3.6 掉落物拾取工具名（Numen collect_items 式契约）
+PICKUP_TOOL = "pickup"
 
 # 给 VLM 的工具用途说明（schema 的 description 是"getStats()。spec §8.2。"这类
 # 内部记号，对模型无用；这里换成面向模型的操作指引）
@@ -102,6 +104,12 @@ PRIMITIVE_TOOL_HINTS: dict[str, str] = {
         "契约：范围内已挖完但不足 count 且有收获 = 成功"
         "（文本会说明挖到几个）；范围内一个都没有 = 失败（建议确认 ID 或走近些）；"
         "超时时同参数重发可续做",
+    PICKUP_TOOL:
+        "捡起身边的掉落物（Numen collect_items 式契约）：自动走到掉落物旁让游戏"
+        "磁吸拾取，实体消失 = 已捡起，不匹配的绝对不碰。item_ids 给物品注册名"
+        "（最多 8 个）只捡匹配的；缺省捡 radius 范围内全部掉落。多人服礼仪："
+        "只捡明确属于自己活动的掉落物（如你刚挖出来的），别人的掉落不要碰。"
+        "radius 默认 12 格；0 件也是成功（范围内没有可捡的）",
 }
 
 # 两张表合并给 VLM（分开放是原语描述长且自成体系，与 bridge 工具的一句话提示分层）
@@ -153,6 +161,18 @@ class CollectBlockParams(BaseModel):
     # T7：挖掉后是否顺路捡起匹配的掉落物（要获得目标物品 = True 默认；
     # 挖通道/清理地形等不要掉落物 = False，如圆石一路捡会拖慢挖掘）
     pickup: bool = True
+
+
+class PickupParams(BaseModel):
+    """pickup({item_ids?, radius?})：捡起身边掉落物（走位磁吸；M3.6 注册为 VLM 工具）。
+
+    item_ids 缺省 = 捡 radius 内全部掉落（多人服礼仪由工具描述约束 VLM：只对
+    明确属于自己活动的掉落使用缺省形式）；radius 与 brain 侧 DROP_QUERY_RANGE
+    默认对齐 12 格。
+    """
+
+    item_ids: list[str] | None = Field(default=None, min_length=1, max_length=8)
+    radius: int = Field(default=12, ge=1, le=32)
 
 
 # ---------------------------------------------------------------------- 注册表
@@ -309,7 +329,7 @@ async def _handle_finish(client: BridgeClient, args: dict[str, Any]) -> ToolOutc
 
 
 def _primitive_factories(cancel: Callable[[], bool] | None) -> tuple[ToolHandler, ...]:
-    """三个任务级原语的 handler 工厂（M3.5 T3）。
+    """任务级原语的 handler 工厂（M3.5 T3 三个 + M3.6 pickup）。
 
     - ``cancel``：绑定循环急停态的检查回调（AgentLoop 传 ``lambda: self._stop_requested``；
       None = 原语不可取消——注册表独立使用/测试时）。registry.execute 的签名是
@@ -334,14 +354,19 @@ def _primitive_factories(cancel: Callable[[], bool] | None) -> tuple[ToolHandler
             args["block_ids"], args["count"],
             pickup=args.get("pickup", True), cancel=cancel)
 
-    return walk_to, dig_block, collect_block
+    async def pickup(client: Any, args: dict[str, Any]) -> ToolOutcome:
+        # item_ids 被 pydantic exclude_none 排除 = 缺省"捡全部"语义
+        return await Primitives(client).pickup(
+            args.get("item_ids"), radius=args.get("radius", 12), cancel=cancel)
+
+    return walk_to, dig_block, collect_block, pickup
 
 
 # ---------------------------------------------------------------------- 默认注册表
 
 
 def default_registry(cancel: Callable[[], bool] | None = None) -> ToolRegistry:
-    """M3.5 默认注册表（9 bridge 工具 + 3 任务级原语 + command + finish = 14 个）。
+    """M3.6 默认注册表（9 bridge 工具 + 4 任务级原语 + command + finish = 15 个）。
 
     ``cancel``：原语的急停检查回调，AgentLoop 构造时传 ``lambda: self._stop_requested``
     把循环急停态接进原语微步循环；None = 不可取消（独立使用/测试，向后兼容旧签名）。
@@ -361,7 +386,7 @@ def default_registry(cancel: Callable[[], bool] | None = None) -> ToolRegistry:
         ))
     # 任务级原语：排在键鼠原语之后、command/finish 之前——系统提示里的分层引导
     # （原语优先、键鼠兜底）才是选用顺序的权威，这里只保证都在表里
-    walk_to, dig_block, collect_block = _primitive_factories(cancel)
+    walk_to, dig_block, collect_block, pickup = _primitive_factories(cancel)
     registry.register(ToolSpec(
         name=WALK_TO_TOOL,
         description=TOOL_HINTS[WALK_TO_TOOL],
@@ -420,6 +445,29 @@ def default_registry(cancel: Callable[[], bool] | None = None) -> ToolRegistry:
         params_model=CollectBlockParams,
     ))
     registry.register(ToolSpec(
+        name=PICKUP_TOOL,
+        description=TOOL_HINTS[PICKUP_TOOL],
+        parameters={
+            "type": "object",
+            "properties": {
+                "item_ids": {
+                    "type": "array", "items": {"type": "string"},
+                    "minItems": 1, "maxItems": 8,
+                    "description": "要捡的物品注册名（最多 8 个，如 minecraft:oak_log）；"
+                                   "缺省 = 捡 radius 范围内全部掉落"
+                                   "（多人服只对自己活动的掉落这么用）",
+                },
+                "radius": {
+                    "type": "integer", "minimum": 1, "maximum": 32,
+                    "description": "搜索半径（格），默认 12",
+                },
+            },
+            "required": [],
+        },
+        handler=pickup,
+        params_model=PickupParams,
+    ))
+    registry.register(ToolSpec(
         name=COMMAND_TOOL,
         description=TOOL_HINTS[COMMAND_TOOL],
         parameters={
@@ -463,12 +511,14 @@ __all__ = [
     "COMMAND_TOOL",
     "DIG_BLOCK_TOOL",
     "FINISH_TOOL",
+    "PICKUP_TOOL",
     "PRIMITIVE_TOOL_HINTS",
     "SCHEMA_TOOLS_DIR",
     "TOOL_HINTS",
     "WALK_TO_TOOL",
     "CollectBlockParams",
     "DigBlockParams",
+    "PickupParams",
     "ToolHandler",
     "ToolOutcome",
     "ToolRegistry",

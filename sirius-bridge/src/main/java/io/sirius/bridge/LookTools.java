@@ -175,6 +175,19 @@ final class LookTools {
         player.setYHeadRot(player.getYRot());
     }
 
+    /**
+     * Yaw-only absolute rotation write (M4.1 movement look): the same setter
+     * + interpolation-field + head-rotation discipline as
+     * {@link #applyRotation} without touching pitch, so walking never
+     * disturbs an aiming pitch. MUST run on the client main thread;
+     * package-private: {@link MovementLook} reuses it every tick.
+     */
+    static void applyYaw(LocalPlayer player, double yaw) {
+        player.setYRot((float) yaw);
+        player.yRotO = player.getYRot();
+        player.setYHeadRot(player.getYRot());
+    }
+
     /** Maps a schema violation to the standard {@code -32602} response. */
     private static JsonObject invalidParams(ToolContext ctx, ToolContracts.InvalidParams e) {
         return Json.errorResponse(ctx.id(), Json.INVALID_PARAMS, e.getMessage(), null);

@@ -260,10 +260,15 @@ class TestToolCalls:
 
 
 class TestCommand:
-    """M2-D command() 编排：T → text → ENTER 的出站顺序与结果/错误语义（对 mock 回环）。"""
+    """M2-D command() 编排：T → text → ENTER 的出站顺序与结果/错误语义（对 mock 回环）。
+
+    M4.1 T1 起时序里穿插 getGuiState 确认轮询（聊天屏确实打开/确实关闭）；
+    mock 身体的通用回包没有 ``screen_open`` 字段 → 确认退化为 M2-D 定时等待，
+    行为与旧版一致——这些用例断言的是 input.* 序列的**相对顺序**不变。
+    """
 
     def test_command_sends_t_text_enter_in_order(self):
-        """出站帧顺序必须严格是 input.key T(84) → input.text → input.key ENTER(257)；
+        """input.* 帧相对顺序必须严格是 input.key T(84) → input.text → input.key ENTER(257)；
         返回值为最后一步（ENTER）的 result（mock 未编排工具回通用成功，params 被 echo）。
         code 用整数键码——冻结 schema input.key.code 声明的是 integer。"""
 
@@ -279,8 +284,14 @@ class TestCommand:
 
                     client._send = recording_send
                     result = await client.command("/give @s diamond 1", settle=0.05)
-            assert [f["method"] for f in sent if f.get("type") == "request"] == [
-                "input.key", "input.text", "input.key"]
+            requests = [f for f in sent if f.get("type") == "request"]
+            input_methods = [f["method"] for f in requests
+                             if f["method"].startswith("input.")]
+            assert input_methods == ["input.key", "input.text", "input.key"]
+            # 确认轮询（getGuiState）只允许出现在 T 之后 / ENTER 之后——绝不领先于 T
+            methods = [f["method"] for f in requests]
+            assert "getGuiState" in methods          # M4.1：确认时序生效（mock 下退化为一次探测）
+            assert methods.index("getGuiState") > methods.index("input.key")
             key_frames = [f for f in sent if f.get("method") == "input.key"]
             assert key_frames[0]["params"] == {"code": 84}      # GLFW T
             assert key_frames[1]["params"] == {"code": 257}     # GLFW ENTER
@@ -306,6 +317,117 @@ class TestCommand:
                         await client.command("你好，世界", settle=0.05)
             assert excinfo.value.code == -32012
             assert "permission_denied" in excinfo.value.message
+
+        asyncio.run(scenario())
+
+
+class TestCommandRace:
+    """M4.1 T1 回归：命令竞态——背靠背/并发 command 绝不合并、不交错。
+
+    复现原型：M4-rerun 00:41:01 反射 #stop 与 #goto 在聊天输入层合并成
+    ``stop#goto``（Command not found），逃生命令被吞、bot 被围殴致死。
+    对 FakeWorldBridge（有 getGuiState 聊天状态机）走完整确认时序。
+    """
+
+    @staticmethod
+    def _fast_confirm() -> callable:
+        """把 GUI 确认轮询压到最快；返回恢复函数（模块常量必须原样还原）。"""
+        from sirius_brain.bridge import client as client_module
+        saved = (client_module.CHAT_POLL_INTERVAL,
+                 client_module.CHAT_OPEN_TIMEOUT,
+                 client_module.CHAT_CLOSE_TIMEOUT)
+        client_module.CHAT_POLL_INTERVAL = 0.01
+        client_module.CHAT_OPEN_TIMEOUT = 1.5
+        client_module.CHAT_CLOSE_TIMEOUT = 1.5
+
+        def restore() -> None:
+            (client_module.CHAT_POLL_INTERVAL,
+             client_module.CHAT_OPEN_TIMEOUT,
+             client_module.CHAT_CLOSE_TIMEOUT) = saved
+        return restore
+
+    def test_concurrent_commands_never_merge_on_wire(self):
+        """并发两条 command（模拟反射 #stop 与探针 #goto 同时发）：
+        wire 上必须是两帧完整独立的 T→text→ENTER——fake 的 submitted 恰两行原文，
+        绝不出现 ``#stop#goto …`` 合并行（这正是线上事故形态）。"""
+
+        async def scenario():
+            from sirius_brain.mock import FakeWorldBridge
+            restore = self._fast_confirm()
+            try:
+                async with FakeWorldBridge(port=0) as fake:
+                    async with BridgeClient(fake.url) as client:
+                        await asyncio.gather(
+                            client.command("#stop", settle=0.02),
+                            client.command("#goto 10 20", settle=0.02),
+                        )
+            finally:
+                restore()
+            assert fake.submitted == ["#stop", "#goto 10 20"]
+            # 两条消息各自的 T→ENTER 完整成对（顺序即发送序）
+            t_count = sum(1 for k in fake.key_presses if k["code"] == 84)
+            enter_count = sum(1 for k in fake.key_presses if k["code"] == 257)
+            assert t_count == 2 and enter_count == 2
+            assert fake.texts == ["#stop", "#goto 10 20"]
+
+        asyncio.run(scenario())
+
+    def test_back_to_back_commands_are_two_complete_frames(self):
+        """背靠背（await 完一条再发下一条）：同样必须两行独立文本——
+        ENTER 关闭确认（getGuiState 无 Chat 屏）是下一条 T 放行前的门。"""
+
+        async def scenario():
+            from sirius_brain.mock import FakeWorldBridge
+            restore = self._fast_confirm()
+            try:
+                async with FakeWorldBridge(port=0) as fake:
+                    async with BridgeClient(fake.url) as client:
+                        for _ in range(3):  # 三连发加大窗口期暴露
+                            await client.command("#stop", settle=0.02)
+                            await client.command("#goto 10 20", settle=0.02)
+            finally:
+                restore()
+            assert fake.submitted == ["#stop", "#goto 10 20"] * 3
+
+        asyncio.run(scenario())
+
+    def test_command_raises_when_chat_never_opens(self):
+        """T 打不开聊天框（GUI 被占用）→ 报错拒绝盲发：wire 上绝不出现
+        input.text / ENTER（旧行为会把文本发进任意 GUI，ENTER 还可能误点按钮）。"""
+
+        async def scenario():
+            from sirius_brain.bridge import client as client_module
+            from sirius_brain.mock import FakeWorldBridge
+            saved = (client_module.CHAT_OPEN_TIMEOUT,
+                     client_module.CHAT_POLL_INTERVAL)
+            client_module.CHAT_OPEN_TIMEOUT = 0.15
+            client_module.CHAT_POLL_INTERVAL = 0.02
+            sent: list[str] = []
+            try:
+                async with FakeWorldBridge(port=0) as fake:
+                    async with BridgeClient(fake.url) as client:
+                        original_send = client._send
+
+                        async def recording_send(frame):
+                            sent.append(frame.method if hasattr(frame, "method") else "?")
+                            await original_send(frame)
+
+                        client._send = recording_send
+                        # GUI 恒被背包屏占用（T 被它吃掉，聊天框永远不开）
+                        async def gui_always_inventory(method, params):
+                            return {"in_game": True, "screen_open": True,
+                                    "screen_class": "InventoryScreen", "slots": []}
+
+                        fake.tool_result = gui_always_inventory  # type: ignore[method-assign]
+                        with pytest.raises(BridgeError) as excinfo:
+                            await client.command("#stop", settle=0.02)
+                    assert "聊天框未能打开" in str(excinfo.value)
+                    # 只发了 T 与 getGuiState 确认——文本与 ENTER 从未上 wire
+                    assert "input.text" not in sent
+                    assert sent.count("input.key") == 1  # 仅那一下 T
+            finally:
+                (client_module.CHAT_OPEN_TIMEOUT,
+                 client_module.CHAT_POLL_INTERVAL) = saved
 
         asyncio.run(scenario())
 
@@ -354,10 +476,28 @@ class TestHello:
             assert frames, "客户端没有发出任何帧"
             assert frames[0].get("type") == "hello"
             assert frames[0].get("token") == "t0"
-            assert frames[0].get("protocol_version") == "1.2"  # M3.5 T6 起默认 1.2（config.py 同步）
+            assert frames[0].get("protocol_version") == "1.3"  # M4.1 起默认 1.3（config.py 同步）
             assert any(f.get("method") == "capabilities/list" for f in frames[1:])
 
         asyncio.run(scenario())
+
+    def test_hello_ack_recognized_not_unknown(self, caplog):
+        """M3.6 T2：真机 hello_ack（连接后首条入站帧）被识别——不再落进
+        "忽略无法识别的帧"分支；hello 握手记 acked 且 detail 带 ok/版本。"""
+
+        async def scenario():
+            async with _RawPushServer([
+                json.dumps({"type": "hello_ack", "ok": True, "protocol_version": "1.2"}),
+            ]) as server:
+                async with BridgeClient(server.url, token="t0") as client:
+                    hello = await client.wait_hello(timeout=3.0)
+            assert hello is not None and hello.status == "acked"
+            assert "hello_ack" in hello.detail and "1.2" in hello.detail
+
+        with caplog.at_level(logging.DEBUG, logger="sirius_brain.bridge.client"):
+            asyncio.run(scenario())
+        assert any("hello_ack" in record.getMessage() for record in caplog.records)
+        assert not any("无法识别" in record.getMessage() for record in caplog.records)
 
 
 class TestTaskFrames:

@@ -17,7 +17,8 @@
                   ToolError(-32602)（文案含"触及"，与真 bridge 一致）；已空
                   already_air；bedrock timeout 不移除；眼位→中心连线上有遮挡块时
                   连遮挡块一起移除并标 broken_via_occluder；**挖掉的方块原地生成
-                  掉落物实体**（T7，挖啥掉啥 count 1）
+                  掉落物实体**（T7，挖啥掉啥 count 1）；broken 结果附 drops——挖点
+                  4 格内新出现的 item 实体聚合（挖前快照 diff，M3.6 T3 对齐真 bridge）
 - command 路径  → BridgeClient.command 的 T→text→ENTER 三连：input.key 开聊天框、
                   input.text 暂存文本、input.key ENTER 提交；``#goto x [y] z`` 启动
                   假 Baritone 协程（每 0.5s 前进 4.3 m/s，到达即停），``#stop`` 停止
@@ -32,6 +33,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import math
 from typing import Any
 
@@ -55,6 +57,9 @@ MIN_BREAK_HOLD_MS = 100
 DIG_SIM_ELAPSED_MS = 200
 #: fake dig 的视线采样步长（格）：眼位→中心连线找遮挡块
 DIG_OCCLUDER_STEP = 0.25
+#: fake dig 掉落观察半径（格）：与 Java 侧 DigContracts.DROPS_SCAN_RADIUS 同源——
+#: 破坏后扫挖点附近该半径内**新出现**的 item 实体聚合成 drops（M3.6 T3）
+DIG_DROP_SCAN_RADIUS = 4.0
 #: world.query 结果条数上限：与 Java 侧 BLOCKS_CAP 一致
 BLOCKS_CAP = 32
 #: world.query entities 结果条数上限：与 Java 侧 ENTITIES_CAP 一致（T7）
@@ -80,9 +85,11 @@ BLOCK_TAGS: dict[str, set[str]] = {
     "#planks": _PLANK_IDS,
 }
 
-# BridgeClient.command 编排用的 GLFW 键码（与 bridge/client.py 一致）
+# BridgeClient.command 编排用的 GLFW 键码（与 bridge/client.py 一致；ESC 是
+# M4.1 发送失败后的输入框清理键）
 GLFW_KEY_T = 84
 GLFW_KEY_ENTER = 257
+GLFW_KEY_ESCAPE = 256
 
 
 def _normalized_block_id(block_id: str) -> str:
@@ -121,6 +128,12 @@ class FakeWorldBridge(MockBridgeServer):
         #: 掉落物实体表（T7）：uuid → world.query entities 条目形态的 dict
         #: （uuid/name/type=minecraft:item/item/count/position；测试可直接增删改写）
         self.item_drops: dict[str, dict[str, Any]] = {}
+        #: 非掉落物实体表（M4 危险模拟）：uuid → entities 条目形态的 dict，
+        #: 额外带 category（monster/creature/misc...）与 width（碰撞箱宽）——
+        #: 对齐 M4 后真 bridge 的 entities 载荷（flee 的敌对判定/危险半径输入）
+        self.mob_entities: dict[str, dict[str, Any]] = {}
+        #: getStats 字段覆盖（M4 危险模拟）：health/air/food/alive 等可直接注入
+        self.stats_override: dict[str, Any] = {}
         #: _spawn_drop 生成的掉落是否带 no_absorb 标记（测试开关："走到身上也
         #: 不吸附、只能被外部移除"的场景——skip 防死循环 / 第三方捡走测试）
         self.drop_no_absorb = False
@@ -131,9 +144,15 @@ class FakeWorldBridge(MockBridgeServer):
         self.pitch = 0.0
         # wire 记录（断言用）
         self.submitted: list[str] = []          # ENTER 提交的聊天行（含 # 命令）
+        self.texts: list[str] = []              # M4.1：input.text 的 wire 记录
+        self.chats_sent: list[str] = []         # M4.1：chat.send 直发的 wire 记录
         self.looks: list[tuple[float, float, float]] = []
         self.clicks: list[dict[str, Any]] = []
         self.digs: list[dict[str, Any]] = []    # T6：dig 工具调用的 wire 记录
+        self.key_presses: list[dict[str, Any]] = []  # M4：input.key 的 wire 记录
+        #: chat.send 模拟错误码（None=正常受理；-32601=模拟旧 jar 无此工具，
+        #: 测试直发通道的回落路径）
+        self.chat_send_error: int | None = None
         # 聊天框状态机（BridgeClient.command 的 T→text→ENTER 三连）
         self._chat_open = False
         self._pending_text: str | None = None
@@ -156,14 +175,23 @@ class FakeWorldBridge(MockBridgeServer):
             return self._result_key(params)
         if method == "input.text":
             return self._result_text(params)
+        if method == "getGuiState":
+            return self._result_gui_state()
+        if method == "chat.send":
+            return self._result_chat_send(params)
         return await super().tool_result(method, params)  # 未覆盖 → 通用成功
 
     # ------------------------------------------------------------------ 感知
 
     def _result_get_stats(self) -> dict[str, Any]:
-        """getStats：结构对照 two_player_scene.json（位置换成活的）。"""
+        """getStats：结构对照 two_player_scene.json（位置换成活的）。
+
+        M4 危险模拟：stats_override 直接覆盖输出字段（health/air/alive 等），
+        眼位水检测靠 blocks 表里放 minecraft:water（真实语义——getStats 没有
+        水/火字段，反射层本来就用 world.query 眼位方块判水）。
+        """
         self._absorb_items()  # 轮询点 = 吸附时机（原语行走中轮询 getStats）
-        return {
+        result = {
             "in_game": True,
             "health": 20.0,
             "food": 20,
@@ -177,6 +205,8 @@ class FakeWorldBridge(MockBridgeServer):
             "effects": [],
             "alive": True,
         }
+        result.update(self.stats_override)
+        return result
 
     def _result_world_query(self, params: dict[str, Any]) -> dict[str, Any]:
         self._absorb_items()  # 轮询点 = 吸附时机（掉落物查询/方块复核前先结算物理）
@@ -203,12 +233,13 @@ class FakeWorldBridge(MockBridgeServer):
         return {"blocks": top, "count": len(top), "truncated": truncated}
 
     def _result_world_query_entities(self, params: dict[str, Any]) -> dict[str, Any]:
-        """world.query(entities)：T7 掉落物实体表 → 与 Java filterEntities 同口径。
+        """world.query(entities)：掉落物 + mob 实体表 → 与 Java filterEntities 同口径。
 
-        假世界只有 item 实体（players/zombies 不模拟）；filter 按实体 type registry
-        名匹配（短名自动补 minecraft: 前缀，与 Java 侧归一化一致）；range 为与玩家
-        的平方 3D 距离判定；cap 128 + truncated。item 实体条目带 item 注册名与
-        count（T7 bridge 契约），其余实体（本假世界没有）不带。
+        掉落物条目带 item 注册名与 count（T7 bridge 契约）；M4 起两类实体都带
+        category/width（掉落物按真 bridge 语义报 misc/0.25，mob_entities 里的
+        注入值原样透传——flee 的敌对判定/危险半径输入）。filter 按实体 type
+        registry 名匹配（短名自动补 minecraft: 前缀）；range 为与玩家的平方 3D
+        距离判定；cap 128 + truncated。
         """
         range_ = float(params.get("range", 16))
         raw_filters = params.get("filter") or []
@@ -217,7 +248,9 @@ class FakeWorldBridge(MockBridgeServer):
         max_dist_sq = range_ * range_
         out: list[dict[str, Any]] = []
         truncated = False
-        for drop in self.item_drops.values():
+        all_entities = itertools.chain(self.item_drops.values(),
+                                       self.mob_entities.values())
+        for drop in all_entities:
             if wanted_types is not None and drop["type"] not in wanted_types:
                 continue
             pos = drop["position"]
@@ -232,6 +265,10 @@ class FakeWorldBridge(MockBridgeServer):
             if drop.get("item") is not None:  # item 实体专属字段（T7）
                 entry["item"] = drop["item"]
                 entry["count"] = int(drop.get("count", 1))
+            # M4 注册表类别 + 碰撞箱宽：真 bridge 对一切实体输出；fake 里
+            # 掉落物按真语义固定 misc/0.25，mob_entities 的注入值原样透传
+            entry["category"] = str(drop.get("category") or "misc")
+            entry["width"] = float(drop.get("width", 0.25))
             out.append(entry)
         return {"entities": out, "count": len(out), "truncated": truncated}
 
@@ -292,6 +329,10 @@ class FakeWorldBridge(MockBridgeServer):
         与真 bridge 的契约对齐：already_air 幂等成功；不可破坏 bedrock → timeout
         不移除；眼位→中心连线穿过的第一个实心块算遮挡（连同目标一起移除，标
         broken_via_occluder=true——真 bridge 是"先破遮挡再轮到目标"的监视按住）。
+        M3.6 T3：broken 结果附 ``drops:[{item,count}]``——挖点 DIG_DROP_SCAN_RADIUS
+        内**新出现**的 item 实体聚合（先快照再 diff，别人先掉的排除；真 bridge
+        破坏后等 20 tick 再扫，fake 世界同步无延迟直接扫）。already_air/timeout
+        不带 drops（与真 bridge 一致）。
         """
         self.digs.append(dict(params))
         x, y, z = int(params["x"]), int(params["y"]), int(params["z"])
@@ -315,6 +356,7 @@ class FakeWorldBridge(MockBridgeServer):
                     "elapsed_ms": timeout_ms}
         occluder = self._occluder_on_line(ex, ey, ez, center, target)
         self._aim_at(*center)  # bridge 的平滑瞄准终态
+        seen_before = self._drop_uuids_near(center)  # 挖前快照（diff 掉别人的）
         del self.blocks[target]
         self._spawn_drop(x, y, z, block_id)  # 挖啥掉啥（T7；遮挡树叶不掉落）
         if occluder is not None:
@@ -323,7 +365,32 @@ class FakeWorldBridge(MockBridgeServer):
                                   "elapsed_ms": DIG_SIM_ELAPSED_MS * (2 if occluder else 1)}
         if occluder is not None:
             result["broken_via_occluder"] = True
+        result["drops"] = self._drops_since(center, seen_before)
         return result
+
+    def _drop_uuids_near(self, center: tuple[float, float, float],
+                         radius: float = DIG_DROP_SCAN_RADIUS) -> set[str]:
+        """挖点 radius 格内现存掉落物的 uuid 集（挖前快照，diff 基线）。"""
+        seen = set()
+        for uuid, drop in self.item_drops.items():
+            pos = drop["position"]
+            if math.dist((pos["x"], pos["y"], pos["z"]), center) <= radius:
+                seen.add(uuid)
+        return seen
+
+    def _drops_since(self, center: tuple[float, float, float],
+                     seen_before: set[str],
+                     radius: float = DIG_DROP_SCAN_RADIUS) -> list[dict[str, Any]]:
+        """快照之后新出现在挖点 radius 格内的掉落物，按注册名聚合成 [{item,count}]。"""
+        aggregated: dict[str, int] = {}
+        for uuid, drop in self.item_drops.items():
+            if uuid in seen_before:
+                continue  # 挖之前就躺着的（别人的）：不算本次挖掘的掉落
+            pos = drop["position"]
+            if math.dist((pos["x"], pos["y"], pos["z"]), center) > radius:
+                continue
+            aggregated[str(drop["item"])] = aggregated.get(str(drop["item"]), 0) + int(drop.get("count", 1))
+        return [{"item": item, "count": count} for item, count in aggregated.items()]
 
     def _occluder_on_line(self, ex: float, ey: float, ez: float,
                           center: tuple[float, float, float],
@@ -345,6 +412,8 @@ class FakeWorldBridge(MockBridgeServer):
 
     def _result_key(self, params: dict[str, Any]) -> dict[str, Any]:
         code = int(params.get("code", -1))
+        self.key_presses.append({"code": code,
+                                 "duration_ms": int(params.get("duration_ms", 0))})
         if code == GLFW_KEY_T:
             self._chat_open = True
         elif code == GLFW_KEY_ENTER:
@@ -354,6 +423,10 @@ class FakeWorldBridge(MockBridgeServer):
                 self.submitted.append(line)
                 if line.startswith("#"):
                     self._handle_baritone(line)
+        elif code == GLFW_KEY_ESCAPE:
+            # M4.1：ESC 丢弃聊天输入框残留（BridgeClient.command 发送失败后的清理）
+            self._chat_open = False
+            self._pending_text = None
         return {"injected": True, "key": f"glfw:{code}", "glfw_key": code,
                 "modifiers": list(params.get("modifiers") or []),
                 "duration_ms": int(params.get("duration_ms", 0)),
@@ -361,8 +434,32 @@ class FakeWorldBridge(MockBridgeServer):
 
     def _result_text(self, params: dict[str, Any]) -> dict[str, Any]:
         self._pending_text = str(params.get("string", ""))
+        self.texts.append(self._pending_text)
         return {"delivered": True, "length": len(self._pending_text),
                 "delivered_all": True}
+
+    def _result_gui_state(self) -> dict[str, Any]:
+        """getGuiState 的聊天状态机映射（M4.1 T1：BridgeClient.command 的时序确认源）。
+
+        形态对齐真 bridge GuiContracts：无屏 → ``{"screen_open": false}``；
+        聊天框 → ``{"screen_open": true, "screen_class": "ChatScreen", ...}``。
+        """
+        if not self._chat_open:
+            return {"in_game": True, "screen_open": False}
+        return {"in_game": True, "screen_open": True,
+                "screen_class": "ChatScreen", "slots": []}
+
+    def _result_chat_send(self, params: dict[str, Any]) -> dict[str, Any]:
+        """chat.send 直发（M4.1 T3）：绕开 T 键 GUI 的聊天通道——死亡屏占用时的
+        播报路径。``chat_send_error`` 模拟旧 jar（-32601）测回落。"""
+        if self.chat_send_error is not None:
+            raise ToolError(self.chat_send_error,
+                            f"chat.send unavailable (simulated {self.chat_send_error})")
+        text = str(params.get("string", ""))
+        self.chats_sent.append(text)
+        if text.startswith("#"):
+            self._handle_baritone(text)
+        return {"in_game": True, "sent": True, "length": len(text)}
 
     def _result_click(self, params: dict[str, Any]) -> dict[str, Any]:
         self.clicks.append(dict(params))
@@ -468,6 +565,7 @@ __all__ = [
     "BLOCKS_CAP",
     "BLOCK_TAGS",
     "DIG_OCCLUDER_STEP",
+    "DIG_DROP_SCAN_RADIUS",
     "DIG_SIM_ELAPSED_MS",
     "ENTITIES_CAP",
     "EYE_HEIGHT",

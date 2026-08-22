@@ -47,7 +47,14 @@ public final class PermissionContracts {
         /** Any {@code input.*} injection tool (event layer). */
         INPUT,
         /** {@code look}/{@code lookAt}: world-level view rotation (action layer). */
-        LOOK
+        LOOK,
+        /**
+         * {@code chat.send}: the M4.1 v1.3 direct chat channel. Speaking is a
+         * social, GUI-immune action (its whole point is working while a screen
+         * - e.g. the death screen - blocks the T-key path), so it is allowed
+         * under every tier except read-only {@code observe}.
+         */
+        CHAT
     }
 
     /**
@@ -77,8 +84,9 @@ public final class PermissionContracts {
     public static boolean allows(Tier tier, boolean screenOpen, Action action) {
         return switch (tier) {
             case OBSERVE -> false;
-            case INPUT_GUI -> action == Action.INPUT && screenOpen;
-            case INPUT_WORLD -> action == Action.LOOK || !screenOpen;
+            // CHAT is deliberately screen-independent (death-screen broadcast path)
+            case INPUT_GUI -> (action == Action.INPUT && screenOpen) || action == Action.CHAT;
+            case INPUT_WORLD -> action == Action.LOOK || action == Action.CHAT || !screenOpen;
             case FULL -> true;
         };
     }
@@ -95,12 +103,15 @@ public final class PermissionContracts {
 
     /** Error-frame message body for the {@code -32012} permission denial. */
     public static String deniedMessage(Tier tier, boolean screenOpen, Action action) {
-        String what = action == Action.LOOK ? "look/lookAt" : "input.*";
+        String what = action == Action.LOOK ? "look/lookAt"
+                : action == Action.CHAT ? "chat.send" : "input.*";
         String need = switch (tier) {
-            case OBSERVE -> "tier \"observe\" is read-only (no input.*, no look)";
+            case OBSERVE -> "tier \"observe\" is read-only (no input.*, no look, no chat.send)";
             case INPUT_GUI -> action == Action.INPUT
                     ? "tier \"input_gui\" allows input.* only while a GUI screen is open (screen_open=" + screenOpen + ")"
-                    : "tier \"input_gui\" does not allow look/lookAt (world-level)";
+                    : action == Action.LOOK
+                    ? "tier \"input_gui\" does not allow look/lookAt (world-level)"
+                    : "tier \"input_gui\" does not allow chat.send";
             case INPUT_WORLD -> action == Action.INPUT
                     ? "tier \"input_world\" allows input.* only while NO GUI screen is open (screen_open=" + screenOpen + ")"
                     : "tier \"input_world\" allows look/lookAt";

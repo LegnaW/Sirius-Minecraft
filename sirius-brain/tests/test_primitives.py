@@ -14,7 +14,7 @@ import asyncio
 import math
 import time
 
-from sirius_brain.agent import Primitives
+from sirius_brain.agent import PICKUP_TOOL, Primitives, default_registry
 from sirius_brain.agent import primitives as primitives_module
 from sirius_brain.bridge import BridgeClient
 from sirius_brain.bridge.client import BridgeError
@@ -293,7 +293,8 @@ class TestScreenBarrier:
 class TestDigBlock:
     def test_dig_success(self):
         """触及范围内：一次 bridge dig RPC（自带瞄准+按住）→ 方块消失，话术带 registry 名。
-        T6 后走 bridge 智能原语：wire 上只有 dig 调用，无 lookAt/input.click 编排。"""
+        T6 后走 bridge 智能原语：wire 上只有 dig 调用，无 lookAt/input.click 编排。
+        M3.6 T3：破坏结果附实测掉落（drops → 话术"掉落 …×n"）。"""
 
         async def main() -> None:
             server = FakeWorldBridge(port=0, position={"x": 4.5, "y": 64.0, "z": 2.5},
@@ -301,7 +302,8 @@ class TestDigBlock:
             client = await make_pair(server)
             try:
                 outcome = await Primitives(client).dig_block(3, 64, 2)
-                assert outcome.text == "已挖掉 minecraft:spruce_log（3,64,2）"
+                assert outcome.text == ("已挖掉 minecraft:spruce_log（3,64,2），"
+                                        "掉落 minecraft:spruce_log×1")
                 assert (3, 64, 2) not in server.blocks
                 # bridge 路径：dig 一次到位（timeout_ms 封顶 30s 协议上限），无段循环
                 assert len(server.digs) == 1
@@ -763,6 +765,154 @@ class TestPickupMethod:
                 outcome = await Primitives(client).pickup(["#minecraft:logs"])
                 assert "非 #tag" in outcome.text
                 assert not [line for line in server.submitted if line.startswith("#goto")]
+            finally:
+                await client.close()
+                await server.close()
+
+        asyncio.run(main())
+
+    def test_pickup_without_ids_sweeps_all(self):
+        """M3.6：缺省 item_ids = 捡范围内全部掉落（Numen collect_items 全收集；
+        多人服礼仪由 VLM 工具描述约束使用场景）。"""
+
+        async def main() -> None:
+            server = FakeWorldBridge(port=0, position=dict(ORIGIN))
+            add_drop(server, "drop-a", "minecraft:oak_log", 3.5, 64.5, 0.5)
+            add_drop(server, "drop-b", "minecraft:oak_log", -3.5, 64.5, 0.5)
+            add_drop(server, "drop-c", "minecraft:stick", 0.5, 64.5, 4.5)
+            client = await make_pair(server)
+            try:
+                outcome = await Primitives(client).pickup()
+                assert outcome.text == "已捡起 3 个 全部掉落物"
+                assert not server.item_drops
+            finally:
+                await client.close()
+                await server.close()
+
+        asyncio.run(main())
+
+
+# ---------------------------------------------------------------------- dig 实测掉落（M3.6 T3）
+
+
+class TestDigDrops:
+    def test_dig_result_carries_new_drops_only(self):
+        """fake dig 契约：broken 附 drops=[{item,count}]——挖前快照内已存在的
+        （别人的）不算，already_air/timeout 不带该字段（对齐真 bridge）。"""
+
+        async def main() -> None:
+            server = FakeWorldBridge(port=0, position={"x": 4.5, "y": 64.0, "z": 2.5},
+                                     blocks={(3, 64, 2): "oak_log", (5, 64, 4): "bedrock"})
+            # 挖前就躺在挖点 4 格内的别人掉的（同 id 也不能算本次掉落）
+            add_drop(server, "pre-existing", "minecraft:oak_log", 3.5, 64.5, 2.5)
+            client = await make_pair(server)
+            try:
+                result = await client.call("dig", {"x": 3, "y": 64, "z": 2})
+                assert result["result"] == "broken"
+                assert result["drops"] == [{"item": "minecraft:oak_log", "count": 1}]
+                timeout = await client.call("dig", {"x": 5, "y": 64, "z": 4,
+                                                    "timeout_ms": 600})
+                assert timeout["result"] == "timeout" and "drops" not in timeout
+                air = await client.call("dig", {"x": 3, "y": 64, "z": 2})
+                assert air["result"] == "already_air" and "drops" not in air
+            finally:
+                await client.close()
+                await server.close()
+
+        asyncio.run(main())
+
+    def test_collect_prefers_dig_drops_over_registry_guess(self, monkeypatch):
+        """匹配优先级（T3 主张）：dig 实测 drops > registry id 猜测——模组方块
+        掉落物注册名与方块不同名（magic_block→apple），实测清单才能捡对。"""
+        monkeypatch.setattr(primitives_module, "DIG_CLICK_HOLD_MS", 150)
+
+        class CustomDropWorld(FakeWorldBridge):
+            def _spawn_drop(self, x, y, z, block_id):
+                item = "minecraft:apple" if block_id == "minecraft:magic_block" else block_id
+                super()._spawn_drop(x, y, z, item)
+
+        async def main() -> None:
+            server = CustomDropWorld(port=0, position=dict(ORIGIN),
+                                     blocks={(6, 64, 0): "magic_block"})
+            client = await make_pair(server)
+            try:
+                outcome = await Primitives(client).collect_block(["magic_block"], 1)
+                # registry 猜测（magic_block）匹配不上 apple 掉落——只有实测
+                # drops 才能把 apple 捡走（旧逻辑此话术不会带拾取注记）
+                assert outcome.text == "已挖到 1/1 个 magic_block，已捡起 1 个掉落"
+                assert not server.blocks and not server.item_drops
+            finally:
+                await client.close()
+                await server.close()
+
+        asyncio.run(main())
+
+    def test_collect_skips_sweep_when_dig_reports_no_drops(self):
+        """drops=[]（明确无掉落，如挖了但啥也没掉）= 不发起拾取走位——
+        区别于 None（旧 jar，回落 registry 猜测再扫一遍）。"""
+
+        class DroplessWorld(FakeWorldBridge):
+            def _spawn_drop(self, x, y, z, block_id):
+                pass  # 挖了但什么都不掉
+
+        async def main() -> None:
+            server = DroplessWorld(port=0, position=dict(ORIGIN),
+                                   blocks={(6, 64, 0): "magic_block"})
+            client = await make_pair(server)
+            try:
+                outcome = await Primitives(client).collect_block(["magic_block"], 1)
+                assert outcome.text == "已挖到 1/1 个 magic_block"  # 无拾取注记
+                # 也没有为拾取发起走位：#goto 只有 1 次（挖位走位）
+                gotos = [line for line in server.submitted if line.startswith("#goto")]
+                assert len(gotos) == 1
+            finally:
+                await client.close()
+                await server.close()
+
+        asyncio.run(main())
+
+    def test_collect_falls_back_to_registry_on_old_bridge(self, monkeypatch):
+        """旧 jar（dig 回 -32601，fallback 段循环无 drops）：回落 registry id
+        精确匹配照样能捡起掉落（兼容路径回归）。"""
+        monkeypatch.setattr(primitives_module, "DIG_SETTLE", 0.02)
+        monkeypatch.setattr(primitives_module, "DIG_CLICK_HOLD_MS", 150)
+        monkeypatch.setattr(primitives_module, "DIG_CLICK_HOLD_MAX_MS", 150)
+
+        async def main() -> None:
+            server = FakeWorldBridge(port=0, position=dict(ORIGIN),
+                                     blocks={(6, 64, 0): "oak_log"})
+            client = await make_pair(server)
+            try:
+                outcome = await Primitives(NoDigClient(client)).collect_block(["oak_log"], 1)
+                assert outcome.text == "已挖到 1/1 个 oak_log，已捡起 1 个掉落"
+                assert not server.blocks and not server.item_drops
+            finally:
+                await client.close()
+                await server.close()
+
+        asyncio.run(main())
+
+
+class TestPickupTool:
+    def test_registered_tool_end_to_end(self):
+        """M3.6：pickup 注册进默认注册表——registry.execute 驱动真实 wire：
+        指定 item_ids 只捡匹配（多人服礼仪），缺省参数捡全部。"""
+
+        async def main() -> None:
+            server = FakeWorldBridge(port=0, position=dict(ORIGIN))
+            add_drop(server, "drop-a", "minecraft:oak_log", 3.5, 64.5, 0.5)
+            add_drop(server, "drop-b", "minecraft:stick", -3.5, 64.5, 0.5)
+            client = await make_pair(server)
+            registry = default_registry()
+            try:
+                outcome = await registry.execute(client, PICKUP_TOOL,
+                                                 {"item_ids": ["minecraft:oak_log"],
+                                                  "radius": 8})
+                assert outcome.text == "已捡起 1 个 minecraft:oak_log"
+                assert set(server.item_drops) == {"drop-b"}   # 木棍不碰（礼仪）
+                outcome = await registry.execute(client, PICKUP_TOOL, {})  # 缺省=捡全部
+                assert outcome.text == "已捡起 1 个 全部掉落物"
+                assert not server.item_drops
             finally:
                 await client.close()
                 await server.close()
